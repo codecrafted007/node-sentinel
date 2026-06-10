@@ -1,0 +1,299 @@
+# HOW: How the eBPF probe is built, embedded, and run
+
+> *"Since I don't know how this is being embedded and run — could you explain the current process like I'm a junior dev who just onboarded into the project?"*
+
+This document answers exactly that. No prior eBPF knowledge assumed. By the end you'll understand how a `.c` file ends up running **inside the Linux kernel**, how it gets baked into our Go binary, and how the agent reads its results back out.
+
+It's specific to our Phase-1 scheduler observer (`internal/ebpf/bpf/sched_monitor.bpf.c`), but the mechanics apply to every observer we'll add later.
+
+## Contents
+
+1. [The one big idea: two separate worlds](#1-the-one-big-idea-two-separate-worlds)
+2. [The build pipeline, step by step](#2-the-build-pipeline-step-by-step)
+3. [How it gets "embedded" — bpf2go + go:embed](#3-how-it-gets-embedded--bpf2go--goembed)
+4. [Tour of the generated file (`sched_bpfel.go`)](#4-tour-of-the-generated-file-sched_bpfelgo)
+5. [How it "runs" — loading and attaching](#5-how-it-runs--loading-and-attaching)
+6. [The full runtime picture](#6-the-full-runtime-picture)
+7. [Repo cheat-sheet: which file does what](#7-repo-cheat-sheet-which-file-does-what)
+8. [The practical rules you'll use daily](#8-the-practical-rules-youll-use-daily)
+
+---
+
+## 1. The one big idea: two separate worlds
+
+There are **two programs** here, living in two different worlds that normally can't touch each other:
+
+| | Where it lives | Language | What it is |
+|---|---|---|---|
+| **The agent** | Userspace (a normal process) | Go | `bin/agent` — what you `sudo ./bin/agent` |
+| **The probe** | Inside the Linux kernel | C (compiled to BPF) | `sched_monitor.bpf.c` |
+
+The kernel won't let a random program run code inside it — that could crash the whole machine. **eBPF** is the official, safe way to do it: you submit a tiny program, the kernel **verifies** it can't do anything dangerous (no out-of-bounds memory, no infinite loops), and then runs it for you whenever specific events happen.
+
+So our job is two things:
+1. Get that C code **into** the kernel.
+2. Set up a way for the Go agent to **read the results back out**.
+
+The bridge between the two worlds is a **map** — a key/value table that lives in the kernel but both sides can access. The probe writes histograms into it; the agent reads them out. Neither side calls the other directly; they only meet at the map.
+
+---
+
+## 2. The build pipeline, step by step
+
+Here's the journey from C source to a running probe, and which command does each step (these all live inside `build.sh` / the `Makefile`):
+
+```
+   sched_monitor.bpf.c          ← C source you edit
+          │
+          │  [1] clang -target bpf        (inside `make generate`)
+          ▼
+   sched_monitor.bpf.o           ← BPF *bytecode* (not x86! a special instruction set)
+          │
+          │  [2] bpf2go                    (also inside `make generate`)
+          ▼
+   sched_bpfel.go  +  sched_bpfel.o   ← Go file that EMBEDS the bytecode + typed helpers
+          │
+          │  [3] go build ./cmd/agent     (`make build`)
+          ▼
+   bin/agent                     ← ONE binary with the BPF bytecode baked inside it
+          │
+          │  [4] sudo ./bin/agent  →  loadSchedObjects() → bpf() syscall
+          ▼
+   probe now lives in the kernel, firing on every context switch
+```
+
+Steps **[2] embedding** and **[4] running** are the parts that feel like magic — the next sections unpack them.
+
+> **Why "bpfel"?** `el` = *little-endian*. `bpf2go` emits one file per byte-order; on x86/arm64 (little-endian) we use `sched_bpfel.go`. The `-target bpfel` flag in the generate directive picks this.
+
+---
+
+## 3. How it gets "embedded" — bpf2go + go:embed
+
+`bpf2go` is a **code generator** from the `cilium/ebpf` library. It's wired up by one line in `internal/ebpf/loader.go`:
+
+```go
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target bpfel -type sched_hist sched bpf/sched_monitor.bpf.c -- -I./bpf -O2 -g -Wall
+```
+
+When `make generate` runs `go generate`, that comment executes. `bpf2go` does two things:
+
+1. **Compiles** `sched_monitor.bpf.c` → `sched_monitor.bpf.o` (the bytecode) using clang.
+2. **Generates a Go file** (`sched_bpfel.go`) you never write by hand. It contains the embed directive, typed structs mirroring your C, and loader functions.
+
+The key trick is **`go:embed`**: at build time `go build` copies the compiled `.o` bytes *inside* `bin/agent` as a byte array. After that, the standalone `.o` file isn't needed — the kernel program travels **inside the Go binary** as data, and gets pushed into the kernel when the agent starts.
+
+> This is why the generated files (`sched_bpfel.go`, `sched_bpfel.o`) are **gitignored and regenerated on the build host** — they're build artifacts, like compiled output, not source.
+
+---
+
+## 4. Tour of the generated file (`sched_bpfel.go`)
+
+Here are the parts that matter, pulled from the real generated file (header says `// Code generated by bpf2go; DO NOT EDIT.`).
+
+### 4a. The embedding — bottom of the file
+
+```go
+// Do not access this directly.
+//
+//go:embed sched_bpfel.o
+var _SchedBytes []byte
+```
+
+**This is the whole "baked into the binary" trick.** `_SchedBytes` holds the raw compiled bytecode. That's why we ship one self-contained binary.
+
+### 4b. A Go struct generated from your C struct
+
+```go
+type schedSchedHist struct {
+	_       structs.HostLayout
+	Slots   [27]uint64
+	TotalUs uint64
+	Count   uint64
+}
+```
+
+It mirrors your C, field-for-field:
+
+```c
+struct sched_hist { __u64 slots[27]; __u64 total_us; __u64 count; };
+```
+
+That's the `-type sched_hist` flag at work — it reads the struct from the object's debug info and emits a matching Go type with identical memory layout (`structs.HostLayout`). This is the type `internal/ebpf/sched.go` reads per-CPU copies into:
+
+```go
+var percpu []schedSchedHist   // one entry per CPU
+```
+
+Add a field to the C struct and this regrows automatically on the next `make generate` — no manual struct-keeping.
+
+### 4c. Two flavors of everything: "Spec" vs loaded
+
+This is the one concept to internalize. Each program and map is defined **twice**:
+
+```go
+// BEFORE the kernel — a blueprint parsed from the bytecode
+type schedMapSpecs struct {
+	RunqLatencyMap *ebpf.MapSpec `ebpf:"runq_latency_map"`
+	WakeupTsMap    *ebpf.MapSpec `ebpf:"wakeup_ts_map"`
+}
+
+// AFTER the kernel — a live handle to the real thing
+type schedMaps struct {
+	RunqLatencyMap *ebpf.Map `ebpf:"runq_latency_map"`
+	WakeupTsMap    *ebpf.Map `ebpf:"wakeup_ts_map"`
+}
+```
+
+- A `*ebpf.MapSpec` / `*ebpf.ProgramSpec` is a **description** ("a per-CPU hash map named `runq_latency_map`") — exists before anything touches the kernel.
+- A `*ebpf.Map` / `*ebpf.Program` is a **live handle** to an object the kernel actually created — you can read/write it.
+
+The `` `ebpf:"runq_latency_map"` `` tag matches the Go field to the named object in your C (`runq_latency_map SEC(".maps")`). Note the **naming convention**: C `snake_case` → Go `CamelCase`. That's why our `loader.go` uses `o.objs.RunqLatencyMap` and `o.objs.HandleSchedSwitch` — those names come from here:
+
+```go
+type schedPrograms struct {
+	HandleSchedSwitch    *ebpf.Program `ebpf:"handle_sched_switch"`
+	HandleSchedWakeup    *ebpf.Program `ebpf:"handle_sched_wakeup"`
+	HandleSchedWakeupNew *ebpf.Program `ebpf:"handle_sched_wakeup_new"`
+}
+```
+
+Three programs ↔ your three `BPF_PROG(handle_sched_*)` functions. Two maps ↔ your two `SEC(".maps")` definitions.
+
+### 4d. The loader functions — the path into the kernel
+
+```go
+func loadSched() (*ebpf.CollectionSpec, error) {
+	reader := bytes.NewReader(_SchedBytes)                  // read the embedded bytecode
+	spec, err := ebpf.LoadCollectionSpecFromReader(reader)  // parse it into Specs (blueprints)
+	...
+}
+
+func loadSchedObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
+	spec, err := loadSched()
+	...
+	return spec.LoadAndAssign(obj, opts)                    // THIS pushes into the kernel
+}
+```
+
+---
+
+## 5. How it "runs" — loading and attaching
+
+Look at our hand-written `internal/ebpf/loader.go` — `LoadSched()`. When you `sudo ./bin/agent`, the agent calls it and three things happen.
+
+### a) Load — hand the bytecode to the kernel
+
+```go
+var objs schedObjects
+loadSchedObjects(&o.objs, nil)
+```
+
+That one call:
+1. `loadSched()` wraps `_SchedBytes` in a reader and **parses** the bytecode into a `CollectionSpec` (blueprints). Nothing in the kernel yet.
+2. `LoadAndAssign(&o.objs, nil)` is the **bpf() syscall moment**: it creates the maps in the kernel, loads the programs (**the verifier runs here** — if it rejects the program, this errors; that's what "verifier-clean" means), and fills `o.objs.RunqLatencyMap`, `o.objs.HandleSchedSwitch`, etc. with **live handles**.
+
+At this point the programs are loaded but **dormant** — sitting in the kernel, not yet firing.
+
+### b) Attach — tell the kernel *when* to call it
+
+```go
+for name, prog := range map[string]*ebpf.Program{
+	"sched_wakeup":     o.objs.HandleSchedWakeup,
+	"sched_wakeup_new": o.objs.HandleSchedWakeupNew,
+	"sched_switch":     o.objs.HandleSchedSwitch,
+} {
+	link.AttachTracing(link.TracingOptions{Program: prog})
+}
+```
+
+This wires each loaded program to its tracepoint (the `SEC("tp_btf/sched_switch")` line in the C says which one). **After this, it's live.** From now on, every time the Linux scheduler switches tasks, the kernel calls our function — no agent involvement, no polling. Millions of times a second, ~200ns each.
+
+### c) Read — the agent's sleepy timer loop
+
+In `internal/agent/agent.go`, every 5s the agent calls `SchedObserver.Read()` (`internal/ebpf/sched.go`), which iterates `runq_latency_map`, sums the per-CPU copies, and returns histograms. The agent computes percentiles (`internal/metrics`), resolves cgroup IDs to pod names (`internal/cgroup`), and prints.
+
+### d) Cleanup
+
+`schedObjects.Close()` (generated) unloads the programs and frees the maps on shutdown, alongside detaching the links — driven by our `SchedObserver.Close()`.
+
+---
+
+## 6. The full runtime picture
+
+```
+  sudo ./bin/agent
+        │
+        ├─ LoadSched():  bytecode ──bpf() syscall──▶ [ KERNEL: verifier → loaded ]
+        │                AttachTracing() ──────────▶ [ wired to sched tracepoints ]
+        │
+        │   ════════ from here, two things run independently ════════
+        │
+   KERNEL SIDE (event-driven, no agent involved):        USERSPACE SIDE (our Go loop):
+   every context switch →                                 every 5s →
+     handle_sched_switch() runs                             Read() the map (syscall)
+       → computes run-queue latency                         → sum per-CPU copies
+       → writes into runq_latency_map ───map is shared────▶ → percentiles + pod names
+                                                             → print
+```
+
+And the named chain end-to-end:
+
+```
+sched_bpfel.o  ──go:embed──▶  _SchedBytes []byte   (inside bin/agent)
+                                   │
+                      loadSched()  │  parse bytecode
+                                   ▼
+                          CollectionSpec (blueprints: schedMapSpecs, schedProgramSpecs)
+                                   │
+              LoadAndAssign(&objs) │  ◀── bpf() syscall: create maps, load + VERIFY programs
+                                   ▼
+              schedObjects{ HandleSchedSwitch *ebpf.Program,   ← live kernel handles
+                            RunqLatencyMap    *ebpf.Map }
+                                   │
+        loader.go: link.AttachTracing(HandleSchedSwitch)       ← probe goes LIVE
+                                   │
+        sched.go:  RunqLatencyMap.Iterate()                    ← read results back out
+```
+
+The thing you were missing: **your C struct/funcs/maps → bpf2go names them in Go (snake→Camel) → `go:embed` bakes the bytecode in → `LoadAndAssign` pushes it to the kernel and hands you live handles → we attach and read.** Everything our hand-written `loader.go`/`sched.go` touches is defined in the generated file.
+
+---
+
+## 7. Repo cheat-sheet: which file does what
+
+| File | Role |
+|---|---|
+| `internal/ebpf/bpf/sched_monitor.bpf.c` | The kernel probe (C). **You edit this** to change what's measured. |
+| `internal/ebpf/loader.go` | The `//go:generate` directive + `LoadSched()` (load + attach). |
+| `internal/ebpf/sched.go` | `Read()` — pulls data out of the map (sum per-CPU, read-and-delete). |
+| `internal/ebpf/types.go` | The friendly Go type we expose (`CgroupLatency`). |
+| `internal/ebpf/sched_bpfel.go` / `.o` | **Generated** by bpf2go. Don't edit. Gitignored. |
+| `internal/ebpf/bpf/vmlinux.h` | Kernel type definitions dumped from BTF. Host-specific, gitignored. |
+| `internal/agent/agent.go` | The 5s read-loop that uses all of the above. |
+| `internal/metrics/histogram.go` | Turns raw bucket counts into p50/p99. |
+| `internal/cgroup/resolver.go` | Maps a cgroup ID → `namespace/pod/container`. |
+
+---
+
+## 8. The practical rules you'll use daily
+
+**If you change the C file (`sched_monitor.bpf.c`), you must regenerate before building** — otherwise the embedded bytecode is stale:
+
+```sh
+./build.sh        # does generate + build for you (the safe default)
+# or manually:
+make generate     # re-runs bpf2go (recompiles C, regenerates the Go file)
+make build        # rebuilds bin/agent with the new bytecode baked in
+```
+
+**If you only change Go files**, `make build` (or `go build`) is enough — no regenerate needed.
+
+**This only works on the Linux build host** — eBPF needs a real kernel (≥ 5.10 with BTF). On macOS you can edit and run `go test ./internal/metrics/...`, but the load/attach steps only happen on Linux. See `README.md` for the remote-host dev loop and `CLAUDE.md` for the project-wide rules.
+
+**Glossary of terms you'll keep hearing:**
+- **BTF** — type info the kernel exposes about itself (`/sys/kernel/btf/vmlinux`); lets one binary work across kernel versions (CO-RE).
+- **CO-RE** ("Compile Once, Run Everywhere") — `BPF_CORE_READ(...)` records *which field* to read; offsets are fixed up at load time against the host's BTF.
+- **Verifier** — the kernel's safety checker that runs at load; rejects anything that could crash or hang the kernel.
+- **tracepoint** — a stable hook point the kernel exposes (e.g. `sched_switch`); we attach our programs to these.
+- **map** — kernel-resident key/value store shared between the probe and the agent.
