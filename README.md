@@ -4,7 +4,7 @@
 
 Kubernetes shares node resources (CPU run queues, disk I/O queues, NIC queues) across pods, but the scheduler can't see contention at those boundaries. When one pod saturates a shared resource, its neighbors degrade silently. node-sentinel observes the contention *inside the kernel* with eBPF, attributes it to specific pods, and (in later phases) remediates under operator-defined policy.
 
-Full design: [`docs/node-sentinel-design-v0.3.md`](docs/node-sentinel-design-v0.3.md) · dataflow & scale: [`docs/node-sentinel-internals.md`](docs/node-sentinel-internals.md) · **new here? start with [`HOW.md`](HOW.md)** (how the eBPF probe is built, embedded, and run) · progress log: [`PROGRESS.md`](PROGRESS.md).
+**New here?** Start with [`CONCEPTS.md`](CONCEPTS.md) (what it does & how it decides, in plain English), then [`HOW.md`](HOW.md) (how the eBPF probe is built, embedded, and run). Full design: [`docs/node-sentinel-design-v0.3.md`](docs/node-sentinel-design-v0.3.md) · dataflow & scale: [`docs/node-sentinel-internals.md`](docs/node-sentinel-internals.md) · progress log: [`PROGRESS.md`](PROGRESS.md).
 
 ---
 

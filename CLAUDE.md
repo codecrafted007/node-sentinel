@@ -75,5 +75,6 @@ Current code is **Phase 1 (Foundation)** — the agent half only. Key pieces and
 - BPF C is restricted C compiled to bytecode; `vmlinux.h` is host-specific (dumped from BTF) and gitignored. The kernel struct reads most likely to break across kernels: `BPF_CORE_READ(next, cgroups, dfl_cgrp, kn, id)` and the `tp_btf/sched_switch` argument signature.
 - Module path: `github.com/codecrafted007/node-sentinal` (note the repo spells it "sentinal"; the product is "node-sentinel").
 - Generated bpf2go files and `vmlinux.h` are gitignored — the repo is source-only; regenerate on the build host.
+- `CONCEPTS.md` explains what the system does and how it decides (offender/victim, baseline, confidence) in plain-English analogies — it marks each idea ✅ built vs 🔜 planned, so keep those tags accurate as features land.
 - `HOW.md` is the onboarding explainer for how the eBPF probe is compiled, embedded (bpf2go + `go:embed`), loaded, and attached — point new contributors there.
 - See `PROGRESS.md` for a running log of completed work.

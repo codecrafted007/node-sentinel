@@ -47,6 +47,7 @@ Goal: prove kernel→Go run-queue-latency attribution with a standalone agent (d
 - Added `CLAUDE.md` (guidance for future Claude Code sessions), a dev-friendly `README.md` (build host requirements, quick start, remote-dev loop, troubleshooting), and this `PROGRESS.md`.
 - Added `build.sh` — one-shot build (preflight checks → BTF dump → bpf2go → build every `cmd/`), with `--setup/--tidy/--skip-generate` and a non-Linux guard.
 - Added `HOW.md` — junior-dev onboarding explainer: how the eBPF probe is compiled, embedded (bpf2go + `go:embed`), loaded (`LoadAndAssign`/verifier), and attached, with a tour of the generated `sched_bpfel.go`.
+- Added `CONCEPTS.md` — plain-English explanation of what the system does and how it decides (shared-apartment / fitness-watch / dinner-platter / smoke-alarm analogies), with each idea tagged ✅ built vs 🔜 planned.
 - Added `stress-test.sh` — an **acceptance test** for the detector: asserts baseline=`healthy` → under `stress-ng`=`CPU CONTENTION` → recovery=`healthy`, prints PASS/FAIL per phase, exits non-zero on failure (CI-gateable). Options `--workers/--duration/--interval/--top`. Verified green end-to-end.
 
 ### Live-validated on the cluster
