@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 #
-# stress-test.sh — validate the agent by injecting CPU contention and watching
-# run-queue latency rise, then recover. Run on the Linux build host, as root,
-# after the agent is built (./build.sh).
+# stress-test.sh — acceptance test for the contention detector.
 #
-# Flow:  baseline (idle)  ->  inject stress-ng CPU hogs  ->  measure  ->  stop  ->  recovery
+# It checks the property that matters in production: the agent stays quiet when
+# the node is healthy, fires when a pod is genuinely starved of CPU, and goes
+# quiet again when the load stops. Run on the Linux host, as root, after build.
 #
-# What to expect: run-queue p50 climbs from a few µs to hundreds of µs under load
-# (p99 into the multi-ms range) across the resolved pods, then snaps back within
-# seconds of stopping the load. The hog cgroup itself barely shows up — run-queue
-# latency is a victim-side signal (CPU hogs rarely sleep, so they emit few
-# wakeup->switch events). Identifying the offender needs CPU-time intensity
-# (design §7.5 step 2), not yet built.
+#   PHASE 1  baseline      -> expect "healthy", no contention
+#   PHASE 2  under stress  -> expect "CPU CONTENTION"
+#   PHASE 3  recovery      -> expect "healthy" again
+#
+# Prints PASS/FAIL per phase and exits non-zero if any phase fails, so it can
+# gate CI. The agent output for each phase is shown so you can read the numbers.
 #
 # Usage:
 #   sudo ./stress-test.sh [--workers N] [--duration S] [--interval D] [--top N]
 #
-# Defaults: workers = 4 x nproc, duration 45 (s), interval 5s, top 10.
+# Defaults: workers = 4 x nproc, duration 30 (s), interval 5s, top 10.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,7 +24,7 @@ cd "$ROOT"
 
 AGENT="$ROOT/bin/agent"
 WORKERS=$(( $(nproc) * 4 ))
-DURATION=45
+DURATION=30
 INTERVAL=5s
 TOP=10
 UNIT=ns-stress
@@ -35,13 +35,13 @@ while [ $# -gt 0 ]; do
     --duration) DURATION="$2"; shift 2 ;;
     --interval) INTERVAL="$2"; shift 2 ;;
     --top)      TOP="$2"; shift 2 ;;
-    -h|--help)  sed -n '3,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)  sed -n '3,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)          echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
 
-log() { printf '\n\033[1;34m########## %s ##########\033[0m\n' "$*"; }
-err() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; }
+log()  { printf '\n\033[1;34m########## %s ##########\033[0m\n' "$*"; }
+err()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; }
 
 # --- preflight ---
 [ "$(uname -s)" = "Linux" ] || { err "Linux host only (eBPF)."; exit 1; }
@@ -58,21 +58,52 @@ cleanup() { systemctl stop "$UNIT" 2>/dev/null || true; systemctl reset-failed "
 trap cleanup EXIT
 cleanup  # clear any leftover unit from a previous run
 
-log "BASELINE (idle, ~${RUN}s)"
-timeout "$RUN" "$AGENT" --interval "$INTERVAL" --top "$TOP" || true
+run_agent() { timeout "$RUN" "$AGENT" --interval "$INTERVAL" --top "$TOP" 2>&1 || true; }
+count()     { printf '%s\n' "$1" | grep -c "$2" || true; }
 
-log "INJECT CONTENTION: $WORKERS CPU hogs on $(nproc) cores for ${DURATION}s"
+PASS=1
+verdict() { # message  ok(1/0)
+  if [ "$2" = 1 ]; then
+    printf '  [ \033[1;32mPASS\033[0m ] %s\n' "$1"
+  else
+    printf '  [ \033[1;31mFAIL\033[0m ] %s\n' "$1"
+    PASS=0
+  fi
+}
+
+# --- PHASE 1: baseline ---
+log "PHASE 1 — BASELINE (expect: healthy)"
+out=$(run_agent); printf '%s\n' "$out"
+healthy=$(count "$out" "healthy")
+contention=$(count "$out" "CPU CONTENTION")
+[ "$healthy" -ge 1 ] && [ "$contention" -eq 0 ] && ok=1 || ok=0
+verdict "stays quiet when healthy (healthy=$healthy, contention=$contention)" "$ok"
+
+# --- PHASE 2: under stress ---
+log "PHASE 2 — UNDER STRESS: $WORKERS CPU hogs on $(nproc) cores (expect: contention)"
 systemd-run --unit="$UNIT" --collect stress-ng --cpu "$WORKERS" --timeout "${DURATION}s" >/dev/null
 sleep 2
+out=$(run_agent); printf '%s\n' "$out"
+contention=$(count "$out" "CPU CONTENTION")
+[ "$contention" -ge 1 ] && ok=1 || ok=0
+verdict "detects contention under stress (contention=$contention)" "$ok"
 
-log "DURING contention (~${RUN}s)"
-timeout "$RUN" "$AGENT" --interval "$INTERVAL" --top "$TOP" || true
-
-log "STOP contention + let the run queue settle"
+# --- PHASE 3: recovery ---
+log "PHASE 3 — RECOVERY (expect: healthy)"
 cleanup
-sleep 4
+sleep 5
+out=$(run_agent); printf '%s\n' "$out"
+healthy=$(count "$out" "healthy")
+[ "$healthy" -ge 1 ] && ok=1 || ok=0
+verdict "returns to healthy after load stops (healthy=$healthy)" "$ok"
 
-log "RECOVERY (~${RUN}s)"
-timeout "$RUN" "$AGENT" --interval "$INTERVAL" --top "$TOP" || true
-
-log "done — compare p50/p99: a few µs idle -> hundreds of µs / multi-ms under load -> back to baseline"
+# --- summary ---
+echo
+if [ "$PASS" = 1 ]; then
+  printf '\033[1;32mRESULT: PASS\033[0m — detector stays quiet when healthy and fires under stress\n'
+  exit 0
+else
+  printf '\033[1;31mRESULT: FAIL\033[0m — a phase did not behave as expected (see above)\n'
+  printf 'If baseline flagged contention, the node may be genuinely busy or --runq-warn is too low.\n'
+  exit 1
+fi

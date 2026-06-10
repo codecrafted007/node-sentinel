@@ -22,6 +22,10 @@ func main() {
 	flag.IntVar(&cfg.TopN, "top", cfg.TopN, "number of cgroups to display")
 	flag.StringVar(&cfg.CRISocket, "cri-socket", cfg.CRISocket, "CRI endpoint for pod resolution")
 	flag.StringVar(&cfg.CgroupRoot, "cgroup-root", cfg.CgroupRoot, "cgroups v2 subtree to scan for pods")
+	flag.IntVar(&cfg.MinSamples, "min-samples", cfg.MinSamples, "min run-queue samples before a pod counts as a victim")
+	flag.DurationVar(&cfg.RunqWarn, "runq-warn", cfg.RunqWarn, "run-queue p99 a pod must exceed to count as contention")
+	flag.StringVar(&cfg.MetricsAddr, "metrics-addr", cfg.MetricsAddr, "Prometheus /metrics listen address (empty to disable)")
+	flag.StringVar(&cfg.LocalSocket, "local-socket", cfg.LocalSocket, "unix socket for sentinelctl (empty to disable)")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

@@ -12,3 +12,11 @@ type CgroupLatency struct {
 	TotalUs  uint64   // summed latency, for mean
 	Count    uint64   // number of events
 }
+
+// CgroupCPUTime is the on-CPU time a cgroup consumed in one read interval, after
+// summing the per-CPU copies. This is the offender signal — divide by the total
+// across all cgroups to get the cgroup's CPU intensity.
+type CgroupCPUTime struct {
+	CgroupID uint64
+	OnCpuNs  uint64
+}

@@ -47,7 +47,7 @@ Goal: prove kernel→Go run-queue-latency attribution with a standalone agent (d
 - Added `CLAUDE.md` (guidance for future Claude Code sessions), a dev-friendly `README.md` (build host requirements, quick start, remote-dev loop, troubleshooting), and this `PROGRESS.md`.
 - Added `build.sh` — one-shot build (preflight checks → BTF dump → bpf2go → build every `cmd/`), with `--setup/--tidy/--skip-generate` and a non-Linux guard.
 - Added `HOW.md` — junior-dev onboarding explainer: how the eBPF probe is compiled, embedded (bpf2go + `go:embed`), loaded (`LoadAndAssign`/verifier), and attached, with a tour of the generated `sched_bpfel.go`.
-- Added `stress-test.sh` — one-shot validation: baseline → inject `stress-ng` CPU hogs → measure → stop → recovery, with `--workers/--duration/--interval/--top`. Documented in README ("Stress testing & validation") with how to read the result.
+- Added `stress-test.sh` — an **acceptance test** for the detector: asserts baseline=`healthy` → under `stress-ng`=`CPU CONTENTION` → recovery=`healthy`, prints PASS/FAIL per phase, exits non-zero on failure (CI-gateable). Options `--workers/--duration/--interval/--top`. Verified green end-to-end.
 
 ### Live-validated on the cluster
 - Ran the full baseline→inject→recover flow against the running single-node cluster: run-queue p50 jumped from ~2–3 µs to 12–768 µs (p99 into 6–24 ms) across real 5G-core pods under 48 CPU hogs, then recovered within seconds. Pod names kept resolving via CRI even while the cluster's `kubectl`/API discovery was degraded — confirming the resolver's independence from the kube API (§7.4).
@@ -55,8 +55,27 @@ Goal: prove kernel→Go run-queue-latency attribution with a standalone agent (d
 
 ---
 
+### Offender signal — per-cgroup CPU intensity (§7.5 step 2)
+- Extended the `sched_switch` hook to also charge each on-CPU slice to the outgoing task's cgroup (`cpu_time_map`, with a per-CPU `cpu_slice_start`); idle/first-sample skipped.
+- Agent now prints two views every interval: **OFFENDERS** (CPU intensity = a cgroup's share of CPU time consumed) and **VICTIMS** (run-queue latency).
+- Live-validated: under a CPU hog, its cgroup tops the offenders table at ~91% intensity while real pods' run-queue latency climbs — the offender the victim-side signal alone could not surface.
+- Rewrote `sched_monitor.bpf.c` in plain K&R style (readable `log2_bucket` loop, full-word names) per user preference; reloaded verifier-clean.
+
+### Judgement layer — quiet unless genuinely contended
+- Problem: run-queue latency and CPU use are never zero, so raw top-N tables flagged a *healthy* cluster as full of "offenders/victims" — false alarms in prod.
+- Gate added (the first real policy thresholds, as flags): `--min-samples` (default 100) drops small-sample p99 noise; `--runq-warn` (default 5ms) is the run-queue p99 a pod must exceed to count as a victim.
+- The agent now prints a one-line `[OK] healthy` heartbeat when nothing crosses the gate, and the offender/victim tables **only** when at least one pod is genuinely starved.
+- Fair share: the resolver pulls each container's CPU request from CRI (`ContainerStatus` shares → millicores); offenders are judged `within request` vs `OVER fair share` vs `best-effort`/`unattributed`.
+- Live-validated: stable cluster stays silent across intervals; under `stress-ng` it trips with the hog at ~91% (unattributed) and real victims listed. Threshold is workload-dependent — tuned the default to the log2 bucket that separates healthy (~3ms) from contended (~6ms) here.
+
+### Observability surfaces — Prometheus + sentinelctl (Phase 1 exit criteria)
+- Refactored the agent to build one shared `report.Snapshot` per interval, published to stdout, Prometheus, and the CLI (so all three agree).
+- `internal/server`: Prometheus `/metrics` (+ `/healthz`, `/readyz`) via a custom collector that emits from the latest snapshot at scrape time — per-pod series only for current offenders/victims, so cardinality is bounded and a healthy node emits just `sentinel_node_contended` + `sentinel_cgroups_observed`. Plus a unix-socket JSON server for the CLI.
+- `cmd/sentinelctl`: `top` (live) and `status` (one-shot), reading the agent's socket. Pure Go, ships as a second binary (`build.sh` builds all `cmd/*`).
+- Live-validated on the box: healthy → `node_contended 0` / `[OK] HEALTHY`; under stress → `node_contended 1`, per-pod intensity series (hog at 0.88), and full offender/victim tables in `sentinelctl`.
+
 ## Up next (still Phase 1)
 
-- **Per-cgroup CPU-time intensity** — the offender signal (§7.5 step 2); turns the agent from a contention monitor into an attribution engine.
+- **Adaptive baseline + excess magnitude + confidence** — a per-pod EMA baseline (so "victim" means *degraded vs its own normal*, not just above an absolute floor), excess magnitude, temporal correlation, and a confidence score (§7.5 steps 3–6). Removes the workload-dependent `--runq-warn` guesswork; current fair-share verdict ignores magnitude (tiny-request pods read "OVER" even at low %).
 - `internal/cgroup/watcher.go` — inotify live cgroup updates (currently a periodic rescan, the design's fallback).
-- Prometheus `/metrics` endpoint and `sentinelctl top` CLI (Phase 1 exit criteria).
+- Formal overhead benchmark (< 1% CPU, design §16) to close out Phase 1.

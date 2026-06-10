@@ -10,22 +10,30 @@ Full design: [`docs/node-sentinel-design-v0.3.md`](docs/node-sentinel-design-v0.
 
 ## Status — Phase 1 (Foundation), in progress
 
-The per-node **agent** works end-to-end: it loads an eBPF scheduler observer, measures per-cgroup run-queue latency, resolves cgroups to Kubernetes pods, and prints live percentiles. The controller (decision/attribution/remediation) is not built yet — see the roadmap in design §23.
+The per-node **agent** works end-to-end: it loads an eBPF scheduler observer, resolves cgroups to Kubernetes pods, and — crucially — **stays quiet unless the node is genuinely contended**. A stable cluster logs one line per interval; when a pod is actually starved of CPU it prints two views: **offenders** (who's over-using CPU vs. their request) and **victims** (who's waiting for it). The controller (policy decision/remediation) is not built yet — see the roadmap in design §23.
 
-Sample output (running against a live cluster):
+Stable node — just a heartbeat:
 
 ```
-pod resolver: 73 containers mapped
-node-sentinel agent: sched observer attached, reading every 5s
-
-POD (namespace/pod/container)                 RUNQ_P50_US  RUNQ_P99_US     EVENTS
-default/nascontroller-9nll5/nascontroller               2         6144         57
-kube-system/calico-kube-controllers-b8cb7df…            2         1536        174
-kube-system/kube-proxy-gnhtq/kube-proxy                 3          192         34
-system(cg:1448331)                                      2         1536       1317
+12:30:05  [OK] healthy — no CPU contention (no pod above run-queue p99 5ms with >=100 samples; 77 cgroups seen)
 ```
 
-> Run-queue latency is the **victim-side** signal — it shows pods *waiting* for CPU, not the hog causing it. Offender attribution (CPU-time intensity) is the next piece.
+Under real contention (a CPU hog running):
+
+```
+12:31:10  [!] CPU CONTENTION — 6 pod(s) starved on the run queue
+  OFFENDERS — by CPU time
+  POD                                            CPU_MS  INTENSITY  REQ_mCPU  VERDICT
+  system(cg:1599902)                              55968      91.3%         -  system / unattributed
+  default/kafka-0/kafka                            1754       2.9%       250  within request (14.5%)
+  default/batch-job-x/worker                       1200       2.0%         0  no request (best-effort)
+  VICTIMS — by run-queue latency (p99 >= 5ms, >=100 samples)
+  POD                                         RUNQ_P50_US  RUNQ_P99_US     EVENTS
+  default/redis-headless-0/redis                     1536        12288        263
+  default/config-relay-qxp4w/config-relay              24         6144        211
+```
+
+> Two signals from one tracepoint: **CPU intensity** (offender — a pod's share of CPU consumed, judged against the **fair share** implied by its request) and **run-queue latency** (victim — how long a pod waited for a CPU). The gate (`--runq-warn`, `--min-samples`) keeps healthy nodes silent. Adaptive baselines, temporal correlation, and confidence scoring come next (design §7.5).
 
 ---
 
@@ -70,11 +78,44 @@ sudo ./bin/agent --interval 5s --top 12
 | flag | default | meaning |
 |------|---------|---------|
 | `--interval` | `5s` | how often maps are read and a report is printed |
-| `--top` | `20` | how many cgroups to show (sorted by run-queue p99) |
+| `--top` | `20` | how many cgroups to show per table |
+| `--runq-warn` | `5ms` | run-queue p99 a pod must exceed to count as a victim of contention |
+| `--min-samples` | `100` | run-queue samples a pod needs before its p99 is trusted (kills small-sample noise) |
+| `--metrics-addr` | `:2112` | Prometheus `/metrics` listen address (empty to disable) |
+| `--local-socket` | `/var/run/sentinel/agent.sock` | unix socket for `sentinelctl` (empty to disable) |
 | `--cri-socket` | `unix:///run/containerd/containerd.sock` | CRI endpoint for pod resolution |
 | `--cgroup-root` | `/sys/fs/cgroup/kubepods.slice` | cgroup subtree scanned for pods |
 
+`--runq-warn` and `--min-samples` are the contention gate: a stable node prints a single `[OK] healthy` line, and the offender/victim tables appear **only** when a pod is genuinely starved of CPU. The right `--runq-warn` is workload-dependent — latency-sensitive services warrant a lower value; batch nodes a higher one. (Per-workload baselines that adapt this automatically are the next step; design §7.5.)
+
 If the CRI socket is unreachable, the agent still runs and prints raw cgroup IDs (pod resolution is best-effort, never a hard dependency).
+
+## Observability
+
+The agent publishes the same judgement to three places each interval: stdout, a Prometheus endpoint, and a unix socket for the CLI.
+
+**Prometheus** — scrape `http://<node>:2112/metrics` (also `/healthz`, `/readyz`):
+
+| metric | type | labels | meaning |
+|--------|------|--------|---------|
+| `sentinel_node_contended` | gauge | — | 1 if the node is CPU-contended, else 0 |
+| `sentinel_cgroups_observed` | gauge | — | cgroups seen in the last interval |
+| `sentinel_pod_cpu_intensity_ratio` | gauge | `pod` | offender pod's share of CPU consumed (0–1) |
+| `sentinel_pod_cpu_milliseconds` | gauge | `pod` | offender pod's on-CPU ms this interval |
+| `sentinel_pod_runqueue_p99_microseconds` | gauge | `pod` | victim pod's run-queue p99 |
+| `sentinel_pod_runqueue_p50_microseconds` | gauge | `pod` | victim pod's run-queue p50 |
+
+Per-pod series are emitted only for the pods currently in the offender/victim lists, so cardinality is bounded and a healthy node emits just the two node-level gauges. `sentinel_node_contended` is the one to alert on.
+
+**`sentinelctl`** — the on-node CLI (read-only, over the agent's unix socket):
+
+```sh
+sentinelctl top       # live, refreshing view (default)
+sentinelctl status    # one-shot snapshot
+# --socket /var/run/sentinel/agent.sock   --interval 2s
+```
+
+In-cluster you'd `kubectl exec` into the agent pod and run `sentinelctl top` for an htop-style view of who's burning CPU and who's waiting for it.
 
 ---
 
@@ -93,27 +134,31 @@ ssh <user>@<host> 'export PATH=$PATH:/usr/local/go/bin && cd ~/node-sentinel && 
 
 ## Stress testing & validation
 
-To prove the agent actually detects contention (and to validate any new observer), use the `stress-test.sh` helper. It runs **baseline → inject CPU hogs → measure → stop → recovery** and prints the agent output at each phase:
+`stress-test.sh` is an **acceptance test** for the contention detector. It verifies the property that matters in production — *quiet when healthy, loud only under real contention* — across three phases, and prints **PASS/FAIL** (exit non-zero on failure, so it can gate CI):
 
 ```sh
 sudo apt-get install -y stress-ng        # one-time prerequisite
 ./build.sh                               # ensure bin/agent exists
-sudo ./stress-test.sh                     # full baseline/inject/measure/recover run
+sudo ./stress-test.sh                     # runs the test, prints PASS/FAIL
 # options: --workers N (default 4×nproc)  --duration S  --interval 5s  --top 10
 ```
 
-**How to read the result** — run-queue latency per pod should move like this:
+| phase | what it does | passes when |
+|-------|--------------|-------------|
+| **1 — baseline** | runs the agent on the idle node | reports `[OK] healthy`, **no** contention |
+| **2 — under stress** | injects `stress-ng` CPU hogs | reports `[!] CPU CONTENTION` |
+| **3 — recovery** | stops the load, waits, re-runs | returns to `[OK] healthy` |
 
-| phase | run-queue p50 | p99 |
-|-------|---------------|-----|
-| baseline (idle) | a few µs | mostly low |
-| under load | **hundreds of µs** (~100× higher) | multi-millisecond |
-| after stop (≈4s) | back to a few µs | back to baseline |
+```
+RESULT: PASS — detector stays quiet when healthy and fires under stress
+```
 
-Two things to understand about the output:
+The agent's output is shown for each phase so you can read the actual numbers. Two things to understand:
 
-- **It shows victims, not the culprit.** Run-queue latency measures pods *waiting* for a CPU, so the pods that light up are the ones being starved. The hog cgroup itself barely appears — CPU hogs rarely sleep, so they emit few `wakeup→switch` events. Naming the offender needs the CPU-time **intensity** signal (design §7.5 step 2), not yet implemented.
+- **Offenders vs. victims are different tables.** Under contention, the hog tops **OFFENDERS** (high CPU intensity, judged against its CPU request); the starved pods show in **VICTIMS** (high run-queue latency). The hog barely appears in VICTIMS — CPU hogs rarely sleep, so they emit few `wakeup→switch` events — which is why we need both signals.
 - **Pod names come from the CRI socket, not `kubectl`.** Resolution works even if the kube API server is degraded — the resolver reads containerd directly (design §7.4).
+
+If **PHASE 1 fails** (baseline flags contention), the node is genuinely busy or `--runq-warn` is set too low for this workload — raise it. If **PHASE 2 fails**, the stress isn't crossing the threshold — lower `--runq-warn` or add `--workers`.
 
 Prefer to drive it by hand? The core of what the script does:
 

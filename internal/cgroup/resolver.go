@@ -43,6 +43,9 @@ type PodID struct {
 	Pod       string
 	Container string
 	PodUID    string
+	// RequestMilliCPU is the container's CPU request in millicores (0 if unknown
+	// or best-effort). Used to compute a pod's fair share of CPU.
+	RequestMilliCPU int64
 }
 
 func (p PodID) String() string {
@@ -121,10 +124,11 @@ func (r *Resolver) Refresh(ctx context.Context) error {
 		}
 		l := c.GetLabels()
 		next[cgid] = PodID{
-			Namespace: l["io.kubernetes.pod.namespace"],
-			Pod:       l["io.kubernetes.pod.name"],
-			Container: l["io.kubernetes.container.name"],
-			PodUID:    l["io.kubernetes.pod.uid"],
+			Namespace:       l["io.kubernetes.pod.namespace"],
+			Pod:             l["io.kubernetes.pod.name"],
+			Container:       l["io.kubernetes.container.name"],
+			PodUID:          l["io.kubernetes.pod.uid"],
+			RequestMilliCPU: r.requestMilliCPU(ctx, c.GetId()),
 		}
 	}
 
@@ -132,6 +136,25 @@ func (r *Resolver) Refresh(ctx context.Context) error {
 	r.cache = next
 	r.mu.Unlock()
 	return nil
+}
+
+// requestMilliCPU returns a container's CPU request in millicores, derived from
+// the CPU shares the runtime reports for it. Kubernetes maps a CPU request to
+// shares as shares = milli * 1024 / 1000, so we invert that. Returns 0 when the
+// runtime reports nothing (best-effort pods, or an older CRI).
+func (r *Resolver) requestMilliCPU(ctx context.Context, id string) int64 {
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	resp, err := r.rt.ContainerStatus(cctx, &runtimeapi.ContainerStatusRequest{ContainerId: id})
+	if err != nil {
+		return 0
+	}
+	shares := resp.GetStatus().GetResources().GetLinux().GetCpuShares()
+	if shares < 2 {
+		return 0
+	}
+	return shares * 1000 / 1024
 }
 
 // Close releases the CRI connection.
