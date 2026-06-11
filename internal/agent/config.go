@@ -69,6 +69,14 @@ type Config struct {
 	MetricsAddr string
 	// LocalSocket is the unix socket sentinelctl connects to ("" disables it).
 	LocalSocket string
+
+	// --- controller reporting ---
+
+	// ControllerAddr is the controller's base URL (e.g. http://host:8080).
+	// Empty means standalone — the agent just reports locally.
+	ControllerAddr string
+	// NodeName is how this node identifies itself to the controller.
+	NodeName string
 }
 
 // DefaultConfig returns the Phase 1 defaults (design §7.2.2 / §7.4).

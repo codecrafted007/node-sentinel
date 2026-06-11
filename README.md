@@ -4,7 +4,7 @@
 
 Kubernetes shares node resources (CPU run queues, disk I/O queues, NIC queues) across pods, but the scheduler can't see contention at those boundaries. When one pod saturates a shared resource, its neighbors degrade silently. node-sentinel observes the contention *inside the kernel* with eBPF, attributes it to specific pods, and (in later phases) remediates under operator-defined policy.
 
-**New here?** Start with [`CONCEPTS.md`](CONCEPTS.md) (what it does & how it decides, in plain English), then [`HOW.md`](HOW.md) (how the eBPF probe is built, embedded, and run). Full design: [`docs/node-sentinel-design-v0.3.md`](docs/node-sentinel-design-v0.3.md) · dataflow & scale: [`docs/node-sentinel-internals.md`](docs/node-sentinel-internals.md) · progress log: [`PROGRESS.md`](PROGRESS.md).
+**New here?** Start with [`CONCEPTS.md`](CONCEPTS.md) (what it does & how it decides, in plain English), then [`HOW.md`](HOW.md) (how the eBPF probe is built, embedded, and run). **Want to run it?** → [`DEPLOY.md`](DEPLOY.md) (Kubernetes manifests + bare-binary/systemd, step by step). Full design: [`docs/node-sentinel-design-v0.3.md`](docs/node-sentinel-design-v0.3.md) · dataflow & scale: [`docs/node-sentinel-internals.md`](docs/node-sentinel-internals.md) · progress log: [`PROGRESS.md`](PROGRESS.md).
 
 ---
 
@@ -195,12 +195,19 @@ sudo systemctl stop ns-stress               # watch them recover
 
 ```
 cmd/agent/            agent entrypoint: flags + signal handling
+cmd/sentinelctl/      on-node CLI (top / status)
+cmd/controller/       cluster controller (aggregates per-node reports)  [Phase 3]
 internal/agent/       lifecycle (agent.go) + config (config.go)
-internal/ebpf/        loader.go, sched.go (reader), types.go, bpf/*.bpf.c
+internal/ebpf/        loader.go, observers (sched/blkio/net), types.go, bpf/*.bpf.c
 internal/cgroup/      resolver.go (cgroup_id -> pod via CRI) + watcher.go (inotify live updates)
-internal/metrics/     histogram.go — log2 histogram -> percentiles (portable, tested)
+internal/metrics/     histogram.go + baseline.go (learned normals)  — portable, tested
+internal/report/      shared snapshot type (portable)
+internal/server/      Prometheus /metrics + sentinelctl unix socket (portable)
+internal/controller/  cluster aggregator (portable)  [Phase 3]
 docs/                 design + internals
 ```
+
+The controller is **observe-only** today: run it anywhere, point agents at it with `--controller-addr http://<host>:<port>`, and it prints a cluster-wide contention summary. Kubernetes Events, a `NodeHealthPolicy` CRD, and remediation are the next slices.
 
 ## Build targets
 

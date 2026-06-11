@@ -109,6 +109,20 @@ Goal: prove kernel→Go run-queue-latency attribution with a standalone agent (d
 - Insight: **contention is a *change*, so the culprit is whoever *changed*** — a steadily-busy pod that didn't change isn't the cause of *new* contention. The magnitude gate stops a near-zero pod's relative blip from reading as 100%.
 - Live-validated (warm agent + induced loopback loss): apiserver/etcd, though top TX talkers (43%/17% share), now score **0% confidence** (at their normal volume); victims show real degradation (etcd 7.2×, apiserver 8.6× their own normal retransmit rate). In-memory baselines are restart-safe by design (absolute floor covers warmup; durable history lives in Prometheus/events).
 
-## Up next — the controller (Phase 3)
+## Phase 3 — the controller (in progress)
 
-Observers are done (CPU + disk + network), and offender attribution judges anomaly not magnitude. Next is the **controller**: gRPC agent→controller stream, `NodeHealthPolicy` CRD, decision engine, and remediation (taint/cordon/evict) that *acts* on high-confidence offenders — the last 🔜 in CONCEPTS.md.
+Sliced so each step ships: **(1) reporting + cluster view → (2) K8s Events → (3) NodeHealthPolicy CRD + decision engine → (4) remediation.**
+
+### Slice 1 — agent→controller reporting + cluster view
+- `cmd/controller` + `internal/controller`: a cluster-level aggregator. Agents POST their `report.Snapshot` to it; it holds the latest per-node state and prints a one-line cluster summary (`nodes=N healthy=H contended=C stale=S`) plus a headline per contended node. HTTP API: `POST /report`, `GET /status` (JSON), `GET /healthz`. Stale nodes (no report within `--stale-after`) are flagged DataGap. Observe-only — no decisions, no K8s API, no remediation yet.
+- Transport: reuses the JSON `Snapshot` over HTTP (no protoc toolchain); the controller is **portable Go** (builds/tests on macOS). gRPC streaming is the design target for when we need backpressure + the reverse AgentDirective channel (slice 3+).
+- Agent side: `--controller-addr` makes it POST each interval, best-effort — a controller outage never disrupts local detection (the agent stays self-contained). `report.Snapshot` gained `NodeName` (from `NODE_NAME` env or hostname).
+- `build.sh` builds all three binaries (agent, controller, sentinelctl) automatically. Validated locally + on the box.
+
+### Deployment artifacts
+- `Dockerfile` (distroless, packages the prebuilt static binaries — image builds + imports into containerd, validated), `.dockerignore`, `deploy/` Kubernetes manifests (namespace, RBAC/ServiceAccounts, agent DaemonSet with BPF caps + hostPID + `/sys` + CRI-socket mounts, controller Deployment + Service — per design §6.8), and `DEPLOY.md` — a step-by-step guide for both the Kubernetes path and the known-good bare-binary/systemd path. (kubectl apply unverifiable on the test box: its API discovery is degraded — a cluster issue, not the manifests.)
+
+### Up next
+- Slice 2: controller gets a Kubernetes client and emits **Events** on contention (observe/alert).
+- Slice 3: `NodeHealthPolicy` CRD + decision engine (modes observe/alert/enforce); likely migrate transport to gRPC.
+- Slice 4: **remediation** (taint/cordon/evict) behind the confidence + eviction-safety gates — the last 🔜 in CONCEPTS.md.

@@ -1,0 +1,69 @@
+# Per-node agent (DaemonSet). Loads the eBPF observers, resolves cgroups to pods
+# via the host's CRI socket, and reports to the controller.
+#
+# eBPF needs elevated capabilities (not full privilege). If BPF fails to load on
+# your runtime, set `privileged: true` instead of the capabilities block below.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-sentinel-agent
+  namespace: sentinel-system
+  labels:
+    app: node-sentinel-agent
+spec:
+  selector:
+    matchLabels:
+      app: node-sentinel-agent
+  template:
+    metadata:
+      labels:
+        app: node-sentinel-agent
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "2112"
+    spec:
+      serviceAccountName: node-sentinel-agent
+      hostPID: true
+      tolerations:
+        - operator: Exists # run on every node, including control-plane
+      containers:
+        - name: agent
+          image: node-sentinel:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - --interval=5s
+            - --controller-addr=http://node-sentinel-controller:8080
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: metrics
+              containerPort: 2112
+          securityContext:
+            privileged: false
+            capabilities:
+              add: [BPF, PERFMON, SYS_RESOURCE, SYS_PTRACE]
+              drop: [ALL]
+          volumeMounts:
+            - name: sys # /sys/kernel/btf (CO-RE) + /sys/fs/cgroup (resolver)
+              mountPath: /sys
+              readOnly: true
+            - name: cri # container runtime socket for pod resolution
+              mountPath: /run/containerd/containerd.sock
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: cri
+          hostPath:
+            path: /run/containerd/containerd.sock
+            type: Socket

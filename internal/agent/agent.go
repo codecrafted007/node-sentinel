@@ -3,8 +3,11 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"sort"
 	"time"
 
@@ -163,13 +166,42 @@ func (a *Agent) report() error {
 		a.store.Set(snap)
 	}
 	a.printSnapshot(snap)
+	if a.cfg.ControllerAddr != "" {
+		a.reportToController(snap)
+	}
 	return nil
+}
+
+// reportToController POSTs the snapshot to the controller. Best-effort: a
+// reachability problem must never disrupt local detection (the agent is
+// self-contained and keeps working standalone).
+func (a *Agent) reportToController(snap report.Snapshot) {
+	body, err := json.Marshal(snap)
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.cfg.ControllerAddr+"/report", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Printf("controller report failed: %v\n", err)
+		return
+	}
+	_ = resp.Body.Close()
 }
 
 // buildSnapshot judges all three dimensions. The node is healthy unless at least
 // one pod is genuinely starved of CPU, disk I/O, or network.
 func (a *Agent) buildSnapshot(cpu []ebpf.CgroupCPUTime, runq []ebpf.CgroupLatency, blkio []ebpf.CgroupBlkio, network []ebpf.CgroupNet) report.Snapshot {
 	snap := report.Snapshot{
+		NodeName:         a.cfg.NodeName,
 		Time:             time.Now().Format("15:04:05"),
 		CgroupsSeen:      len(runq),
 		RunqWarnUs:       float64(a.cfg.RunqWarn.Microseconds()),

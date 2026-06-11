@@ -6,6 +6,7 @@ package report
 // Snapshot is the agent's judgement for one interval: healthy unless at least
 // one pod is genuinely starved of CPU.
 type Snapshot struct {
+	NodeName      string     `json:"node_name"`
 	Time          string     `json:"time"`
 	Healthy       bool       `json:"healthy"`
 	CgroupsSeen   int        `json:"cgroups_seen"`

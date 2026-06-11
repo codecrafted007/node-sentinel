@@ -10,6 +10,7 @@ import (
 	"context"
 	"flag"
 	"log"
+	"os"
 	"os/signal"
 	"syscall"
 
@@ -18,6 +19,12 @@ import (
 
 func main() {
 	cfg := agent.DefaultConfig()
+
+	nodeName := os.Getenv("NODE_NAME")
+	if nodeName == "" {
+		nodeName, _ = os.Hostname()
+	}
+	cfg.NodeName = nodeName
 	flag.DurationVar(&cfg.ReadInterval, "interval", cfg.ReadInterval, "map read interval")
 	flag.IntVar(&cfg.TopN, "top", cfg.TopN, "number of cgroups to display")
 	flag.StringVar(&cfg.CRISocket, "cri-socket", cfg.CRISocket, "CRI endpoint for pod resolution")
@@ -32,6 +39,8 @@ func main() {
 	flag.IntVar(&cfg.MinSegs, "min-segs", cfg.MinSegs, "min sendmsg calls before a cgroup's retransmits are judged")
 	flag.StringVar(&cfg.MetricsAddr, "metrics-addr", cfg.MetricsAddr, "Prometheus /metrics listen address (empty to disable)")
 	flag.StringVar(&cfg.LocalSocket, "local-socket", cfg.LocalSocket, "unix socket for sentinelctl (empty to disable)")
+	flag.StringVar(&cfg.ControllerAddr, "controller-addr", cfg.ControllerAddr, "controller URL e.g. http://host:8080 (empty = standalone)")
+	flag.StringVar(&cfg.NodeName, "node-name", cfg.NodeName, "this node's name reported to the controller")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

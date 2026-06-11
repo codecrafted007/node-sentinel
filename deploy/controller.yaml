@@ -1,0 +1,52 @@
+# Cluster controller: one replica that aggregates per-node reports. Slice 1 is
+# observe-only (no kube API, no remediation), so it needs no special privileges.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: node-sentinel-controller
+  namespace: sentinel-system
+  labels:
+    app: node-sentinel-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: node-sentinel-controller
+  template:
+    metadata:
+      labels:
+        app: node-sentinel-controller
+    spec:
+      serviceAccountName: node-sentinel-controller
+      containers:
+        - name: controller
+          image: node-sentinel:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/controller", "--listen=:8080", "--log-interval=10s"]
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-sentinel-controller
+  namespace: sentinel-system
+spec:
+  selector:
+    app: node-sentinel-controller
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

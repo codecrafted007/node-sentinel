@@ -1,0 +1,17 @@
+# Service accounts for the agent and controller.
+#
+# Slice 1 needs no cluster RBAC: the agent reads the CRI socket and cgroups
+# directly (not the kube API), and the controller only aggregates reports. The
+# controller's Roles (events, nodes get/patch, pods/eviction) arrive with the
+# later slices that emit Events and remediate.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: node-sentinel-agent
+  namespace: sentinel-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: node-sentinel-controller
+  namespace: sentinel-system

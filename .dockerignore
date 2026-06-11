@@ -1,0 +1,6 @@
+# The image only needs the prebuilt binaries (built by ./build.sh).
+*
+!bin
+!bin/agent
+!bin/controller
+!bin/sentinelctl
