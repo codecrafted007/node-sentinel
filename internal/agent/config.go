@@ -61,7 +61,7 @@ func DefaultConfig() Config {
 		TopN:           20,
 		CRISocket:      "unix:///run/containerd/containerd.sock",
 		CgroupRoot:     "/sys/fs/cgroup/kubepods.slice",
-		ResolveRefresh: 30 * time.Second,
+		ResolveRefresh: 60 * time.Second, // safety-net rescan; the watcher handles liveness
 		MinSamples:          100,
 		RunqWarn:            5 * time.Millisecond,
 		DeviationFactor:     3.0,

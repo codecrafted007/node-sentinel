@@ -8,6 +8,7 @@ go 1.25
 
 require (
 	github.com/cilium/ebpf v0.21.0
+	github.com/fsnotify/fsnotify v1.8.0
 	github.com/prometheus/client_golang v1.23.2
 	google.golang.org/grpc v1.69.4
 	k8s.io/cri-api v0.32.3

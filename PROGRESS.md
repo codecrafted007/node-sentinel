@@ -82,8 +82,14 @@ Goal: prove kernel→Go run-queue-latency attribution with a standalone agent (d
 - Surfaced everywhere: stdout, `sentinelctl`, and new metrics (`sentinel_pod_runqueue_degradation`, `sentinel_pod_offender_confidence`, `sentinel_max_offender_confidence`).
 - Live-validated: acceptance test still PASS; with a warm baseline, victims showed 12–105× their own normal under stress, and confidence stayed honest (max 6% → "alert only") because the hog was a system process. Flipped CONCEPTS.md ideas 1–4 to ✅.
 
-## Up next (still Phase 1 / into Phase 2)
+### Phase 1 closeout — live cgroup watcher + overhead benchmark
+- `internal/cgroup/watcher.go` — inotify (fsnotify) watch over the cgroup tree; debounced create/delete events trigger a resolver refresh, so new pods are resolved in ~0.5s instead of up to a minute. The periodic rescan (now 60s) stays as the safety net; refreshes are serialized with a mutex. Live, acceptance test still PASS.
+- `overhead.sh` — measures agent CPU/RSS (idle + under stress) and BPF handler cost against the design §16 budget.
+- **Measured on the box:** agent **0.09% of node CPU idle / 0.13% under stress** (budget < 1% ✅), **~42 MB RSS** (< 50 MB ✅). BPF handlers: wakeup ~417 ns, switch ~672 ns/event — above the design's ~200 ns because `sched_switch` now does two jobs (CPU-time + run-queue latency, each walking the cgroup hierarchy); userspace budget met with wide headroom, in-kernel cost is a known optimization target.
 
-- `internal/cgroup/watcher.go` — inotify live cgroup updates (currently a periodic rescan, the design's fallback).
-- Formal overhead benchmark (< 1% CPU, design §16) to close out Phase 1.
-- Then the **control plane** (Phases 2–3): broaden to disk/network observers, and build the controller (CRD policy + remediation) that *acts* on high-confidence offenders.
+**Phase 1 (Foundation) is complete** — design §23 exit criteria met: BPF loads verifier-clean, run-queue latency attributed per pod, `sentinelctl top`/`status` works, overhead < 1% CPU. Plus we front-loaded the offender signal, the contention judgement layer, adaptive baselines, and confidence scoring.
+
+## Up next — the control plane (Phases 2–3)
+
+- Broaden observers: disk I/O (`blkio`) and network (`net`) — reuse the resolver, baseline, confidence, and both surfaces.
+- Build the **controller**: gRPC agent→controller stream, `NodeHealthPolicy` CRD, decision engine, and remediation (taint/cordon/evict) that *acts* on high-confidence offenders — the last 🔜 in CONCEPTS.md.

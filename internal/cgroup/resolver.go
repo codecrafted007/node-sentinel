@@ -61,6 +61,8 @@ type Resolver struct {
 	conn       *grpc.ClientConn
 	rt         runtimeapi.RuntimeServiceClient
 
+	refreshMu sync.Mutex // serializes Refresh (watcher + periodic rescan)
+
 	mu    sync.RWMutex
 	cache map[uint64]PodID
 }
@@ -104,6 +106,9 @@ func (r *Resolver) Len() int {
 // container scopes (inode = cgroup_id, dir name carries the container ID), then
 // join against CRI container metadata.
 func (r *Resolver) Refresh(ctx context.Context) error {
+	r.refreshMu.Lock()
+	defer r.refreshMu.Unlock()
+
 	cidToCgroupID, err := r.scanCgroups()
 	if err != nil {
 		return fmt.Errorf("scan cgroups: %w", err)

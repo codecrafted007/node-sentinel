@@ -51,6 +51,15 @@ func (a *Agent) Run(ctx context.Context) error {
 		a.resolver = res
 		defer a.resolver.Close()
 		fmt.Printf("pod resolver: %d containers mapped\n", res.Len())
+
+		// Live cgroup updates: refresh the moment pods come/go, instead of only
+		// on the periodic rescan (design §7.4). The rescan stays as the safety net.
+		if w, err := cgroup.NewWatcher(a.cfg.CgroupRoot); err != nil {
+			fmt.Printf("warning: cgroup watcher disabled (%v); periodic rescan only\n", err)
+		} else {
+			go w.Run(ctx, func() { _ = a.resolver.Refresh(ctx) })
+			fmt.Printf("cgroup watcher: live pod updates enabled\n")
+		}
 	}
 
 	a.store = server.NewStore()

@@ -8,7 +8,7 @@ Kubernetes shares node resources (CPU run queues, disk I/O queues, NIC queues) a
 
 ---
 
-## Status — Phase 1 (Foundation), in progress
+## Status — Phase 1 (Foundation) complete
 
 The per-node **agent** works end-to-end: it loads an eBPF scheduler observer, resolves cgroups to Kubernetes pods, and — crucially — **stays quiet unless the node is genuinely contended**. A stable cluster logs one line per interval; when a pod is actually starved of CPU it prints two views: **offenders** (who's over-using CPU vs. their request) and **victims** (who's waiting for it). The controller (policy decision/remediation) is not built yet — see the roadmap in design §23.
 
@@ -173,6 +173,10 @@ sudo ./bin/agent --interval 5s --top 12     # watch p50/p99 climb
 sudo systemctl stop ns-stress               # watch them recover
 ```
 
+### Overhead
+
+`sudo ./overhead.sh` measures the agent against the budget (design §16): userspace CPU and RSS (idle and under stress) plus per-event BPF handler cost. On a 12-core node it measured **~0.1% of node CPU and ~42 MB RSS** — well within the < 1% CPU / < 50 MB budget. (The BPF handlers run ~400–700 ns/event because `sched_switch` does both CPU-time and run-queue-latency accounting.)
+
 ---
 
 ## Project layout (follows design §7.2.1)
@@ -181,7 +185,7 @@ sudo systemctl stop ns-stress               # watch them recover
 cmd/agent/            agent entrypoint: flags + signal handling
 internal/agent/       lifecycle (agent.go) + config (config.go)
 internal/ebpf/        loader.go, sched.go (reader), types.go, bpf/*.bpf.c
-internal/cgroup/      resolver.go — cgroup_id -> pod (via CRI)
+internal/cgroup/      resolver.go (cgroup_id -> pod via CRI) + watcher.go (inotify live updates)
 internal/metrics/     histogram.go — log2 histogram -> percentiles (portable, tested)
 docs/                 design + internals
 ```
