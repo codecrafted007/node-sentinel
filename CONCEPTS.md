@@ -21,7 +21,7 @@ Every contention problem has two sides, and we measure them separately:
 
 A key subtlety: the hog is often *busy*, not *waiting* — so the victims are the ones who light up the "waiting" meter. That's why we need both measurements to see the whole story.
 
-The same offender/victim idea applies to **every shared facility**. Today the manager watches the **kitchen (CPU)** and the **bathroom (disk I/O)** — a pod hammering the disk makes its neighbours' reads and writes wait, exactly like the CPU case. The **front door (network)** is next. Everything below (learn-the-normal, unusual-and-bad, how-much, confidence) is applied per facility.
+The same offender/victim idea applies to **every shared facility**, and the manager now watches all three: the **kitchen (CPU)**, the **bathroom (disk I/O)**, and the **front door (network)** — a pod flooding the network makes its neighbours' packets get retransmitted, exactly like the CPU and disk cases. Everything below (learn-the-normal, unusual-and-bad, how-much, confidence) is applied per facility.
 
 ## The problem: one rule doesn't fit everyone ✅ (this is today's limitation)
 
@@ -58,6 +58,8 @@ The new logic stops crying wolf about tenants who are simply *built* to be slow,
 Today, if a tenant uses even a *sliver* more than their share, we tag them a hog. Too twitchy. Instead we rank by **how badly** they're overusing.
 
 At a shared dinner platter, one person taking an **extra bite** and another **eating half the dish** are both "over their share" — but only one is the problem. Point at the one eating half.
+
+But "share of the dish" alone has a trap: some tenants are *supposed* to use a lot. The building's front desk (the Kubernetes API server) talks to everyone — it's *always* the busiest on the network. Blaming it for being busy is wrong. So we apply **Idea 1 to offenders too**: a tenant is a hog when they're using far more than *their own* normal — a sudden spike — not merely because they're perpetually the biggest. The front desk humming along at its usual volume → not flagged; a batch job that suddenly floods the network → flagged. The key insight: **contention is a *change*, so the culprit is whoever *changed*.** (Before we've learned a tenant's normal, we say "still learning — can't be sure" rather than guess wrong.)
 
 ## Idea 4 — Say how *sure* we are (a confidence score) ✅ built (shown, not yet acted on)
 

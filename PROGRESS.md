@@ -97,7 +97,18 @@ Goal: prove kernel→Go run-queue-latency attribution with a standalone agent (d
 - Surfaced: stdout + sentinelctl now show per-dimension sections; new metrics (`sentinel_pod_io_bytes`, `sentinel_pod_io_latency_p99_microseconds`, `sentinel_pod_io_offender_confidence`, `sentinel_max_io_offender_confidence`). New flags `--io-warn`, `--min-ops`.
 - Live-validated: blkio observer loads verifier-clean; under `dd` disk load the offender table shows the writer at 99.5% throughput share and I/O victims by latency, with honest attribution (system hog → no confident pod offender). CPU acceptance test still PASS; overhead unchanged. Proved the observer model generalizes beyond CPU.
 
-## Up next — finish observers + the controller (Phases 2–3)
+### Network observer (`net`)
+- `internal/ebpf/bpf/net_monitor.bpf.c` — `tp_btf/tcp_retransmit_skb` (victim: TCP retransmits) + `fentry/tcp_sendmsg` (offender: TX bytes). The hard part: network events fire in softirq context, so the cgroup is read from the **socket** (`sk->sk_cgrp_data.cgroup`), not `current`. `internal/ebpf/net.go` loader + reader; third bpf2go generation.
+- **Generalized the victim core to scalars**: extracted `judgeVictim(baseline, floor, cg, value)` shared by all three dimensions (CPU run-queue p99, I/O latency p99, net retransmit count). Net offenders by TX-throughput share (shared `shareConfidence`); net victims by retransmit count + baseline. Healthy unless a pod is starved of CPU, disk I/O, **or** network.
+- Surfaced: stdout + sentinelctl NETWORK section; new metrics (`sentinel_pod_net_tx_bytes`, `sentinel_pod_net_retransmits`, `sentinel_pod_net_offender_confidence`, `sentinel_max_net_offender_confidence`). New flags `--retrans-warn`, `--min-segs`.
+- Live-validated: net observer loads verifier-clean; TX attributed per pod (apiserver/etcd) via the socket cgroup read; under induced loopback packet loss the victims table shows etcd/apiserver retransmitting (~100/interval) and apiserver as the top TX offender, honest attribution. CPU acceptance test still PASS. **All three contention dimensions now share one judgement.**
 
-- Network observer (`net`): TCP retransmits, packet drops, NIC queue latency — same treatment, last observer before the controller.
-- Build the **controller**: gRPC agent→controller stream, `NodeHealthPolicy` CRD, decision engine, and remediation (taint/cordon/evict) that *acts* on high-confidence offenders — the last 🔜 in CONCEPTS.md.
+### Offender baselines — judge "who changed", not "who's biggest"
+- Problem (caught in review): ranking offenders by raw throughput share perpetually blames the busiest *legitimate* infrastructure — the apiserver is always the top network talker, so it always looked like the offender. Network/disk have no Kubernetes "request" to define a fair share, so raw share was all we had.
+- Fix: applied "learn each pod's normal" (Idea 1) to the **offender** side. New per-dimension usage baselines (CPU-ns, disk-bytes, net-TX-bytes), learned every interval (even when healthy), spikes frozen. Offender confidence is now `min(changed, big-enough, harm)`: deviation-above-its-own-normal **and** a meaningful resource share (≥25% → full) **and** real victim degradation. Warmup fallback: fair-share for CPU (instant from the request), "can't attribute yet" for disk/net.
+- Insight: **contention is a *change*, so the culprit is whoever *changed*** — a steadily-busy pod that didn't change isn't the cause of *new* contention. The magnitude gate stops a near-zero pod's relative blip from reading as 100%.
+- Live-validated (warm agent + induced loopback loss): apiserver/etcd, though top TX talkers (43%/17% share), now score **0% confidence** (at their normal volume); victims show real degradation (etcd 7.2×, apiserver 8.6× their own normal retransmit rate). In-memory baselines are restart-safe by design (absolute floor covers warmup; durable history lives in Prometheus/events).
+
+## Up next — the controller (Phase 3)
+
+Observers are done (CPU + disk + network), and offender attribution judges anomaly not magnitude. Next is the **controller**: gRPC agent→controller stream, `NodeHealthPolicy` CRD, decision engine, and remediation (taint/cordon/evict) that *acts* on high-confidence offenders — the last 🔜 in CONCEPTS.md.

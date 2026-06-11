@@ -30,3 +30,12 @@ type CgroupBlkio struct {
 	Count    uint64   // completed requests (ops)
 	Bytes    uint64   // total bytes moved
 }
+
+// CgroupNet is the network counters for one cgroup over a read interval, after
+// summing the per-CPU copies.
+type CgroupNet struct {
+	CgroupID    uint64
+	Retransmits uint64 // TCP segments retransmitted (victim signal)
+	TxBytes     uint64 // bytes handed to TCP for sending (offender signal)
+	TxSegs      uint64 // number of sendmsg calls
+}

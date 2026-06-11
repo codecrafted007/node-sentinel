@@ -16,24 +16,33 @@ import (
 )
 
 // Agent owns the node-agent lifecycle: load the observers, resolve cgroups to
-// pods, judge contention (CPU and disk I/O) each interval, and publish the
+// pods, judge contention (CPU, disk I/O, network) each interval, and publish the
 // result to stdout, the Prometheus endpoint, and the sentinelctl socket.
 type Agent struct {
-	cfg        Config
-	sched      *ebpf.SchedObserver
-	blkio      *ebpf.BlkioObserver
-	resolver   *cgroup.Resolver
-	baseline   *metrics.Baseline // run-queue latency normals
-	ioBaseline *metrics.Baseline // I/O latency normals
-	store      *server.Store
+	cfg         Config
+	sched       *ebpf.SchedObserver
+	blkio       *ebpf.BlkioObserver
+	net         *ebpf.NetObserver
+	resolver    *cgroup.Resolver
+	baseline    *metrics.Baseline // run-queue latency normals (victim side)
+	ioBaseline  *metrics.Baseline // I/O latency normals (victim side)
+	netBaseline *metrics.Baseline // retransmit normals (victim side)
+	cpuUsage    *metrics.Baseline // CPU-time normals (offender side)
+	ioUsage     *metrics.Baseline // disk-throughput normals (offender side)
+	netUsage    *metrics.Baseline // network-throughput normals (offender side)
+	store       *server.Store
 }
 
 // New constructs an Agent with the given config.
 func New(cfg Config) *Agent {
 	return &Agent{
-		cfg:        cfg,
-		baseline:   metrics.NewBaseline(cfg.BaselineAlpha, cfg.BaselineWarmup),
-		ioBaseline: metrics.NewBaseline(cfg.BaselineAlpha, cfg.BaselineWarmup),
+		cfg:         cfg,
+		baseline:    metrics.NewBaseline(cfg.BaselineAlpha, cfg.BaselineWarmup),
+		ioBaseline:  metrics.NewBaseline(cfg.BaselineAlpha, cfg.BaselineWarmup),
+		netBaseline: metrics.NewBaseline(cfg.BaselineAlpha, cfg.BaselineWarmup),
+		cpuUsage:    metrics.NewBaseline(cfg.BaselineAlpha, cfg.BaselineWarmup),
+		ioUsage:     metrics.NewBaseline(cfg.BaselineAlpha, cfg.BaselineWarmup),
+		netUsage:    metrics.NewBaseline(cfg.BaselineAlpha, cfg.BaselineWarmup),
 	}
 }
 
@@ -47,14 +56,22 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.sched = sched
 	defer a.sched.Close()
 
-	// Block-I/O observer is best-effort — if it fails to load the agent still
-	// runs with CPU contention detection.
+	// Block-I/O observer is best-effort — the agent still runs without it.
 	if blk, err := ebpf.LoadBlkio(); err != nil {
 		fmt.Printf("warning: blkio observer disabled (%v)\n", err)
 	} else {
 		a.blkio = blk
 		defer a.blkio.Close()
 		fmt.Printf("blkio observer attached\n")
+	}
+
+	// Network observer is best-effort too.
+	if n, err := ebpf.LoadNet(); err != nil {
+		fmt.Printf("warning: net observer disabled (%v)\n", err)
+	} else {
+		a.net = n
+		defer a.net.Close()
+		fmt.Printf("net observer attached\n")
 	}
 
 	// Pod resolution is best-effort — the agent still runs if CRI is down.
@@ -65,8 +82,6 @@ func (a *Agent) Run(ctx context.Context) error {
 		defer a.resolver.Close()
 		fmt.Printf("pod resolver: %d containers mapped\n", res.Len())
 
-		// Live cgroup updates: refresh the moment pods come/go, instead of only
-		// on the periodic rescan (design §7.4). The rescan stays the safety net.
 		if w, err := cgroup.NewWatcher(a.cfg.CgroupRoot); err != nil {
 			fmt.Printf("warning: cgroup watcher disabled (%v); periodic rescan only\n", err)
 		} else {
@@ -136,8 +151,14 @@ func (a *Agent) report() error {
 			blkio = io
 		}
 	}
+	var network []ebpf.CgroupNet
+	if a.net != nil {
+		if n, err := a.net.Read(); err == nil {
+			network = n
+		}
+	}
 
-	snap := a.buildSnapshot(cpu, runq, blkio)
+	snap := a.buildSnapshot(cpu, runq, blkio, network)
 	if a.store != nil {
 		a.store.Set(snap)
 	}
@@ -145,23 +166,33 @@ func (a *Agent) report() error {
 	return nil
 }
 
-// buildSnapshot judges both dimensions. The node is healthy unless at least one
-// pod is genuinely starved of CPU or disk I/O.
-func (a *Agent) buildSnapshot(cpu []ebpf.CgroupCPUTime, runq []ebpf.CgroupLatency, blkio []ebpf.CgroupBlkio) report.Snapshot {
+// buildSnapshot judges all three dimensions. The node is healthy unless at least
+// one pod is genuinely starved of CPU, disk I/O, or network.
+func (a *Agent) buildSnapshot(cpu []ebpf.CgroupCPUTime, runq []ebpf.CgroupLatency, blkio []ebpf.CgroupBlkio, network []ebpf.CgroupNet) report.Snapshot {
 	snap := report.Snapshot{
-		Time:            time.Now().Format("15:04:05"),
-		CgroupsSeen:     len(runq),
-		RunqWarnUs:      float64(a.cfg.RunqWarn.Microseconds()),
-		MinSamples:      a.cfg.MinSamples,
-		ConfidenceMin:   a.cfg.ConfidenceThreshold,
-		MaxConfidence:   -1,
-		IOMaxConfidence: -1,
+		Time:             time.Now().Format("15:04:05"),
+		CgroupsSeen:      len(runq),
+		RunqWarnUs:       float64(a.cfg.RunqWarn.Microseconds()),
+		MinSamples:       a.cfg.MinSamples,
+		ConfidenceMin:    a.cfg.ConfidenceThreshold,
+		MaxConfidence:    -1,
+		IOMaxConfidence:  -1,
+		NetMaxConfidence: -1,
 	}
 
 	cpuVictims, cpuWorst := a.cpuVictims(runq)
 	ioVictims, ioWorst := a.ioVictims(blkio)
+	netVictims, netWorst := a.netVictims(network)
 
-	snap.Healthy = len(cpuVictims) == 0 && len(ioVictims) == 0
+	// Learn each pod's normal resource *usage* every interval — even when
+	// healthy — freezing spikes. This is what lets offender attribution find the
+	// pod that CHANGED rather than the one that is simply always busy (the
+	// "blame the front desk" problem). Offenders below read these baselines.
+	a.trackCPUUsage(cpu)
+	a.trackIOUsage(blkio)
+	a.trackNetUsage(network)
+
+	snap.Healthy = len(cpuVictims) == 0 && len(ioVictims) == 0 && len(netVictims) == 0
 	if snap.Healthy {
 		return snap
 	}
@@ -174,87 +205,125 @@ func (a *Agent) buildSnapshot(cpu []ebpf.CgroupCPUTime, runq []ebpf.CgroupLatenc
 		snap.IOOffenders = a.ioOffenders(blkio, signalFromRatio(ioWorst), &snap.IOMaxConfidence)
 		snap.IOVictims = ioVictims
 	}
+	if len(netVictims) > 0 {
+		snap.NetOffenders = a.netOffenders(network, signalFromRatio(netWorst), &snap.NetMaxConfidence)
+		snap.NetVictims = netVictims
+	}
 	return snap
 }
 
-// cpuVictims returns the pods whose run-queue latency is genuinely bad (above
-// the absolute floor and, once their baseline is warm, unusual for themselves),
-// plus the worst degradation ratio seen.
+// judgeVictim is the shared victim core for every dimension: a cgroup is a
+// victim if its metric is above the absolute floor and, once its baseline is
+// warm, at least DeviationFactor times its own normal. It updates the baseline
+// (frozen while a known victim) and returns the degradation ratio (0 if cold).
+func (a *Agent) judgeVictim(baseline *metrics.Baseline, floor float64, cg uint64, value float64) (bool, float64) {
+	ratio, ready := baseline.Deviation(cg, value)
+
+	isVictim := value >= floor
+	if ready && ratio < a.cfg.DeviationFactor {
+		isVictim = false // warm and not unusual for itself
+	}
+	baseline.Observe(cg, value, !(ready && isVictim))
+
+	deg := 0.0
+	if ready {
+		deg = ratio
+	}
+	return isVictim, deg
+}
+
+// cpuVictims: pods starved of CPU (high run-queue latency).
 func (a *Agent) cpuVictims(runq []ebpf.CgroupLatency) ([]report.Victim, float64) {
-	out, worst := a.victims(a.baseline, float64(a.cfg.RunqWarn.Microseconds()), a.cfg.MinSamples,
-		latencyRows(runq))
-	return out, worst
-}
-
-// ioVictims is the I/O analogue of cpuVictims.
-func (a *Agent) ioVictims(blkio []ebpf.CgroupBlkio) ([]report.Victim, float64) {
-	rows := make([]latencyRow, 0, len(blkio))
-	for _, r := range blkio {
-		rows = append(rows, latencyRow{cg: r.CgroupID, slots: r.Slots, samples: r.Count})
-	}
-	return a.victims(a.ioBaseline, float64(a.cfg.IOWarn.Microseconds()), a.cfg.MinOps, rows)
-}
-
-// latencyRow is a generic per-cgroup latency histogram used by victims().
-type latencyRow struct {
-	cg      uint64
-	slots   []uint64
-	samples uint64
-}
-
-func latencyRows(runq []ebpf.CgroupLatency) []latencyRow {
-	rows := make([]latencyRow, 0, len(runq))
-	for _, r := range runq {
-		rows = append(rows, latencyRow{cg: r.CgroupID, slots: r.Slots, samples: r.Count})
-	}
-	return rows
-}
-
-// victims runs the shared victim judgement over any latency dimension: enough
-// samples, above the absolute floor, and — once the per-cgroup baseline is warm
-// — at least DeviationFactor times its own normal. Returns the victims (worst
-// p99 first, capped at TopN) and the worst degradation ratio.
-func (a *Agent) victims(baseline *metrics.Baseline, floorUs float64, minSamples int, rows []latencyRow) ([]report.Victim, float64) {
+	floor := float64(a.cfg.RunqWarn.Microseconds())
 	var out []report.Victim
 	worst := 0.0
 
-	for _, r := range rows {
-		if r.samples < uint64(minSamples) {
+	for _, r := range runq {
+		if r.Count < uint64(a.cfg.MinSamples) {
 			continue
 		}
-		p99 := metrics.Percentile(r.slots, 99)
-		ratio, ready := baseline.Deviation(r.cg, p99)
-
-		isVictim := p99 >= floorUs
-		if ready && ratio < a.cfg.DeviationFactor {
-			isVictim = false // warm and not unusual for itself
-		}
-		baseline.Observe(r.cg, p99, !(ready && isVictim))
-
+		p99 := metrics.Percentile(r.Slots, 99)
+		isVictim, deg := a.judgeVictim(a.baseline, floor, r.CgroupID, p99)
 		if isVictim {
-			deg := 0.0
-			if ready {
-				deg = ratio
-				if ratio > worst {
-					worst = ratio
-				}
+			if deg > worst {
+				worst = deg
 			}
 			out = append(out, report.Victim{
-				Pod:         a.label(r.cg),
-				P50us:       metrics.Percentile(r.slots, 50),
-				P99us:       p99,
-				Degradation: deg,
-				Events:      r.samples,
+				Pod: a.label(r.CgroupID), P50us: metrics.Percentile(r.Slots, 50),
+				P99us: p99, Degradation: deg, Events: r.Count,
 			})
 		}
 	}
-	baseline.Prune()
-
+	a.baseline.Prune()
 	sort.Slice(out, func(i, j int) bool { return out[i].P99us > out[j].P99us })
+	return capVictims(out, a.cfg.TopN), worst
+}
+
+// ioVictims: pods waiting on the disk (high I/O latency).
+func (a *Agent) ioVictims(blkio []ebpf.CgroupBlkio) ([]report.Victim, float64) {
+	floor := float64(a.cfg.IOWarn.Microseconds())
+	var out []report.Victim
+	worst := 0.0
+
+	for _, r := range blkio {
+		if r.Count < uint64(a.cfg.MinOps) {
+			continue
+		}
+		p99 := metrics.Percentile(r.Slots, 99)
+		isVictim, deg := a.judgeVictim(a.ioBaseline, floor, r.CgroupID, p99)
+		if isVictim {
+			if deg > worst {
+				worst = deg
+			}
+			out = append(out, report.Victim{
+				Pod: a.label(r.CgroupID), P50us: metrics.Percentile(r.Slots, 50),
+				P99us: p99, Degradation: deg, Events: r.Count,
+			})
+		}
+	}
+	a.ioBaseline.Prune()
+	sort.Slice(out, func(i, j int) bool { return out[i].P99us > out[j].P99us })
+	return capVictims(out, a.cfg.TopN), worst
+}
+
+// netVictims: pods whose TCP segments are being retransmitted.
+func (a *Agent) netVictims(network []ebpf.CgroupNet) ([]report.NetVictim, float64) {
+	floor := float64(a.cfg.RetransWarn)
+	var out []report.NetVictim
+	worst := 0.0
+
+	for _, r := range network {
+		if r.TxSegs < uint64(a.cfg.MinSegs) {
+			continue
+		}
+		isVictim, deg := a.judgeVictim(a.netBaseline, floor, r.CgroupID, float64(r.Retransmits))
+		if isVictim {
+			if deg > worst {
+				worst = deg
+			}
+			rate := 0.0
+			if r.TxSegs > 0 {
+				rate = float64(r.Retransmits) / float64(r.TxSegs) * 100
+			}
+			out = append(out, report.NetVictim{
+				Pod: a.label(r.CgroupID), Retransmits: r.Retransmits,
+				RatePct: rate, Degradation: deg, Segs: r.TxSegs,
+			})
+		}
+	}
+	a.netBaseline.Prune()
+	sort.Slice(out, func(i, j int) bool { return out[i].Retransmits > out[j].Retransmits })
 	if len(out) > a.cfg.TopN {
 		out = out[:a.cfg.TopN]
 	}
 	return out, worst
+}
+
+func capVictims(v []report.Victim, n int) []report.Victim {
+	if len(v) > n {
+		return v[:n]
+	}
+	return v
 }
 
 // signalFromRatio maps a worst-victim degradation ratio to a 0-1 severity used
@@ -262,13 +331,12 @@ func (a *Agent) victims(baseline *metrics.Baseline, floorUs float64, minSamples 
 // signal, so use a moderate default rather than overclaiming.
 func signalFromRatio(worst float64) float64 {
 	if worst > 1 {
-		return clamp((worst-1)/4, 0, 1) // 5x its baseline → full
+		return clamp((worst-1)/4, 0, 1)
 	}
 	return 0.5
 }
 
-// cpuOffenders ranks cgroups by CPU time and scores each attributable pod's
-// confidence of being the noisy neighbour, capped by how badly victims degraded.
+// cpuOffenders ranks cgroups by CPU time and scores confidence vs fair share.
 func (a *Agent) cpuOffenders(cpu []ebpf.CgroupCPUTime, victimSignal float64, maxConf *float64) []report.Offender {
 	var totalNs uint64
 	var totalReq int64
@@ -291,58 +359,22 @@ func (a *Agent) cpuOffenders(cpu []ebpf.CgroupCPUTime, victimSignal float64, max
 			intensity = float64(r.OnCpuNs) / float64(totalNs) * 100
 		}
 		o := report.Offender{
-			Pod:        a.label(r.CgroupID),
-			CPUms:      float64(r.OnCpuNs) / 1e6,
-			Intensity:  intensity,
-			ReqMilli:   -1,
-			Confidence: -1,
-			Verdict:    "system / unattributed",
+			Pod: a.label(r.CgroupID), CPUms: float64(r.OnCpuNs) / 1e6,
+			Intensity: intensity, ReqMilli: -1, Confidence: -1,
+			Verdict: "system / unattributed",
 		}
 		if pod, ok := a.resolve(r.CgroupID); ok {
 			o.ReqMilli = pod.RequestMilliCPU
 			o.Verdict = fairShareVerdict(intensity, pod.RequestMilliCPU, totalReq)
-			if pod.RequestMilliCPU > 0 && totalReq > 0 {
+			// Warmup fallback (before the usage baseline is warm): excess over
+			// the pod's CPU request — available instantly from the request, no
+			// learning needed. Once warm, deviation-from-own-normal takes over.
+			fallback := -1.0
+			if totalReq > 0 {
 				fair := float64(pod.RequestMilliCPU) / float64(totalReq) * 100
-				excessFrac := (intensity - fair) / 100
-				o.Confidence = clamp(min(clamp(excessFrac/0.5, 0, 1), victimSignal), 0, 1)
-				if o.Confidence > *maxConf {
-					*maxConf = o.Confidence
-				}
+				fallback = clamp((intensity-fair)/100/0.5, 0, 1)
 			}
-		}
-		out = append(out, o)
-	}
-	return out
-}
-
-// ioOffenders ranks cgroups by disk throughput and scores each attributable
-// pod's confidence from its share of disk bytes, capped by victim severity.
-func (a *Agent) ioOffenders(blkio []ebpf.CgroupBlkio, victimSignal float64, maxConf *float64) []report.IOOffender {
-	var totalBytes uint64
-	for _, r := range blkio {
-		totalBytes += r.Bytes
-	}
-
-	sort.Slice(blkio, func(i, j int) bool { return blkio[i].Bytes > blkio[j].Bytes })
-	if len(blkio) > a.cfg.TopN {
-		blkio = blkio[:a.cfg.TopN]
-	}
-
-	out := make([]report.IOOffender, 0, len(blkio))
-	for _, r := range blkio {
-		share := 0.0
-		if totalBytes > 0 {
-			share = float64(r.Bytes) / float64(totalBytes) * 100
-		}
-		o := report.IOOffender{
-			Pod:        a.label(r.CgroupID),
-			MB:         float64(r.Bytes) / 1e6,
-			SharePct:   share,
-			Ops:        r.Count,
-			Confidence: -1,
-		}
-		if _, ok := a.resolve(r.CgroupID); ok {
-			o.Confidence = clamp(min(clamp(share/100/0.5, 0, 1), victimSignal), 0, 1)
+			o.Confidence = a.offenderConfidence(a.cpuUsage, r.CgroupID, float64(r.OnCpuNs), intensity, victimSignal, fallback)
 			if o.Confidence > *maxConf {
 				*maxConf = o.Confidence
 			}
@@ -352,8 +384,122 @@ func (a *Agent) ioOffenders(blkio []ebpf.CgroupBlkio, victimSignal float64, maxC
 	return out
 }
 
+// ioOffenders ranks cgroups by disk throughput; confidence from share of bytes.
+func (a *Agent) ioOffenders(blkio []ebpf.CgroupBlkio, victimSignal float64, maxConf *float64) []report.IOOffender {
+	var total uint64
+	for _, r := range blkio {
+		total += r.Bytes
+	}
+	sort.Slice(blkio, func(i, j int) bool { return blkio[i].Bytes > blkio[j].Bytes })
+	if len(blkio) > a.cfg.TopN {
+		blkio = blkio[:a.cfg.TopN]
+	}
+
+	out := make([]report.IOOffender, 0, len(blkio))
+	for _, r := range blkio {
+		o := report.IOOffender{
+			Pod: a.label(r.CgroupID), MB: float64(r.Bytes) / 1e6,
+			SharePct: share(r.Bytes, total), Ops: r.Count, Confidence: -1,
+		}
+		if _, ok := a.resolve(r.CgroupID); ok {
+			o.Confidence = a.offenderConfidence(a.ioUsage, r.CgroupID, float64(r.Bytes), o.SharePct, victimSignal, -1)
+			if o.Confidence > *maxConf {
+				*maxConf = o.Confidence
+			}
+		}
+		out = append(out, o)
+	}
+	return out
+}
+
+// netOffenders ranks cgroups by TX throughput; confidence from share of bytes.
+func (a *Agent) netOffenders(network []ebpf.CgroupNet, victimSignal float64, maxConf *float64) []report.NetOffender {
+	var total uint64
+	for _, r := range network {
+		total += r.TxBytes
+	}
+	sort.Slice(network, func(i, j int) bool { return network[i].TxBytes > network[j].TxBytes })
+	if len(network) > a.cfg.TopN {
+		network = network[:a.cfg.TopN]
+	}
+
+	out := make([]report.NetOffender, 0, len(network))
+	for _, r := range network {
+		o := report.NetOffender{
+			Pod: a.label(r.CgroupID), MB: float64(r.TxBytes) / 1e6,
+			SharePct: share(r.TxBytes, total), Segs: r.TxSegs, Confidence: -1,
+		}
+		if _, ok := a.resolve(r.CgroupID); ok {
+			o.Confidence = a.offenderConfidence(a.netUsage, r.CgroupID, float64(r.TxBytes), o.SharePct, victimSignal, -1)
+			if o.Confidence > *maxConf {
+				*maxConf = o.Confidence
+			}
+		}
+		out = append(out, o)
+	}
+	return out
+}
+
+func share(part, total uint64) float64 {
+	if total == 0 {
+		return 0
+	}
+	return float64(part) / float64(total) * 100
+}
+
+// trackCPUUsage/trackIOUsage/trackNetUsage learn each cgroup's normal resource
+// usage. Run every interval, including healthy ones, so the baseline knows each
+// pod's normal — and freeze a pod while it is spiking so the spike stays visible.
+func (a *Agent) trackCPUUsage(cpu []ebpf.CgroupCPUTime) {
+	for _, r := range cpu {
+		a.observeUsage(a.cpuUsage, r.CgroupID, float64(r.OnCpuNs))
+	}
+	a.cpuUsage.Prune()
+}
+
+func (a *Agent) trackIOUsage(blkio []ebpf.CgroupBlkio) {
+	for _, r := range blkio {
+		a.observeUsage(a.ioUsage, r.CgroupID, float64(r.Bytes))
+	}
+	a.ioUsage.Prune()
+}
+
+func (a *Agent) trackNetUsage(network []ebpf.CgroupNet) {
+	for _, r := range network {
+		a.observeUsage(a.netUsage, r.CgroupID, float64(r.TxBytes))
+	}
+	a.netUsage.Prune()
+}
+
+func (a *Agent) observeUsage(b *metrics.Baseline, cg uint64, usage float64) {
+	ratio, ready := b.Deviation(cg, usage)
+	spiking := ready && ratio >= a.cfg.DeviationFactor
+	b.Observe(cg, usage, !spiking)
+}
+
+// offenderConfidence scores a pod's likelihood of being the noisy neighbour as
+// the minimum of three signals — all must hold:
+//   - it CHANGED: usage is far above its own learned normal (the pod that spiked,
+//     not the one that is simply always busy). Before the baseline is warm this
+//     uses the dimension's fallback (fair share for CPU; none for disk/net).
+//   - it's BIG ENOUGH: it holds a meaningful share of the resource, so a tiny
+//     pod jumping from near-zero to near-zero can't read as the culprit.
+//   - there is real HARM: victims are actually degraded (victimSignal).
+func (a *Agent) offenderConfidence(b *metrics.Baseline, cg uint64, usage, sharePct, victimSignal, fallback float64) float64 {
+	magnitude := clamp(sharePct/100/0.25, 0, 1) // 25% of the resource → full
+
+	changed := fallback
+	if ratio, ready := b.Deviation(cg, usage); ready {
+		changed = clamp((ratio-1)/4, 0, 1) // 5x its own normal → full
+	} else if fallback < 0 {
+		return -1 // cold baseline, no fallback — honestly cannot attribute yet
+	}
+
+	return clamp(min(min(changed, magnitude), victimSignal), 0, 1)
+}
+
 // fairShareVerdict compares a cgroup's CPU intensity to the share implied by its
-// CPU request. A pod consuming beyond its fair share is the real offender.
+// CPU request.
 func fairShareVerdict(intensity float64, reqMilli, totalReqMilli int64) string {
 	if reqMilli <= 0 {
 		return "no request (best-effort)"
@@ -372,11 +518,12 @@ func fairShareVerdict(intensity float64, reqMilli, totalReqMilli int64) string {
 // per-dimension offender/victim tables when contended.
 func (a *Agent) printSnapshot(s report.Snapshot) {
 	if s.Healthy {
-		fmt.Printf("%s  [OK] healthy — no contention (CPU + disk I/O nominal; %d cgroups seen)\n", s.Time, s.CgroupsSeen)
+		fmt.Printf("%s  [OK] healthy — no contention (CPU + disk + network nominal; %d cgroups seen)\n", s.Time, s.CgroupsSeen)
 		return
 	}
 
-	fmt.Printf("\n%s  [!] CONTENTION — CPU: %d victim(s), I/O: %d victim(s)\n", s.Time, len(s.Victims), len(s.IOVictims))
+	fmt.Printf("\n%s  [!] CONTENTION — CPU: %d, I/O: %d, NET: %d victim(s)\n",
+		s.Time, len(s.Victims), len(s.IOVictims), len(s.NetVictims))
 
 	if len(s.Victims) > 0 {
 		fmt.Printf("  ── CPU ──  %s\n", attribution(s.MaxConfidence, s.ConfidenceMin))
@@ -386,7 +533,7 @@ func (a *Agent) printSnapshot(s report.Snapshot) {
 			fmt.Printf("  %-42s %9.0f %8.1f%% %7s %10s  %s\n",
 				truncate(o.Pod, 42), o.CPUms, o.Intensity, reqStr(o.ReqMilli), confStr(o.Confidence), o.Verdict)
 		}
-		a.printVictims("run-queue latency", s.Victims)
+		a.printLatencyVictims("run-queue latency", s.Victims)
 	}
 
 	if len(s.IOVictims) > 0 {
@@ -397,11 +544,27 @@ func (a *Agent) printSnapshot(s report.Snapshot) {
 			fmt.Printf("  %-42s %10.1f %8.1f%% %8d %10s\n",
 				truncate(o.Pod, 42), o.MB, o.SharePct, o.Ops, confStr(o.Confidence))
 		}
-		a.printVictims("I/O latency", s.IOVictims)
+		a.printLatencyVictims("I/O latency", s.IOVictims)
+	}
+
+	if len(s.NetVictims) > 0 {
+		fmt.Printf("  ── NETWORK ──  %s\n", attribution(s.NetMaxConfidence, s.ConfidenceMin))
+		fmt.Printf("  OFFENDERS — by TX throughput\n")
+		fmt.Printf("  %-42s %10s %9s %8s %10s\n", "POD", "TX_MB", "SHARE", "SEGS", "CONFIDENCE")
+		for _, o := range s.NetOffenders {
+			fmt.Printf("  %-42s %10.1f %8.1f%% %8d %10s\n",
+				truncate(o.Pod, 42), o.MB, o.SharePct, o.Segs, confStr(o.Confidence))
+		}
+		fmt.Printf("  VICTIMS — by TCP retransmits\n")
+		fmt.Printf("  %-42s %12s %10s %9s %8s\n", "POD", "RETRANSMITS", "RATE", "xBASELINE", "SEGS")
+		for _, v := range s.NetVictims {
+			fmt.Printf("  %-42s %12d %9.1f%% %9s %8d\n",
+				truncate(v.Pod, 42), v.Retransmits, v.RatePct, degStr(v.Degradation), v.Segs)
+		}
 	}
 }
 
-func (a *Agent) printVictims(metric string, rows []report.Victim) {
+func (a *Agent) printLatencyVictims(metric string, rows []report.Victim) {
 	fmt.Printf("  VICTIMS — by %s\n", metric)
 	fmt.Printf("  %-42s %12s %12s %9s %10s\n", "POD", "P50_US", "P99_US", "xBASELINE", "EVENTS")
 	for _, v := range rows {
@@ -414,7 +577,7 @@ func (a *Agent) printVictims(metric string, rows []report.Victim) {
 func attribution(maxConf, threshold float64) string {
 	switch {
 	case maxConf < 0:
-		return "attribution: top consumer is unattributed (likely a system process) — no pod offender"
+		return "attribution: no confident pod offender (still learning baselines, or a system process) — alert only"
 	case maxConf >= threshold:
 		return fmt.Sprintf("attribution: confident pod offender (%.0f%% >= %.0f%% threshold)", maxConf*100, threshold*100)
 	default:

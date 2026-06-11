@@ -38,6 +38,14 @@ var (
 		"confidence that a pod is the disk noisy neighbour (0-1)", []string{"pod"}, nil)
 	descIOMaxConfidence = prometheus.NewDesc("sentinel_max_io_offender_confidence",
 		"highest disk-I/O offender confidence this interval (-1 if none attributable)", nil, nil)
+	descNetTxBytes = prometheus.NewDesc("sentinel_pod_net_tx_bytes",
+		"offender pod's TCP TX bytes this interval", []string{"pod"}, nil)
+	descNetRetransmits = prometheus.NewDesc("sentinel_pod_net_retransmits",
+		"victim pod's TCP retransmits this interval", []string{"pod"}, nil)
+	descNetConfidence = prometheus.NewDesc("sentinel_pod_net_offender_confidence",
+		"confidence that a pod is the network noisy neighbour (0-1)", []string{"pod"}, nil)
+	descNetMaxConfidence = prometheus.NewDesc("sentinel_max_net_offender_confidence",
+		"highest network offender confidence this interval (-1 if none attributable)", nil, nil)
 )
 
 // collector emits metrics from the latest snapshot at scrape time, so series
@@ -58,6 +66,10 @@ func (c *collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descIOLatP99
 	ch <- descIOConfidence
 	ch <- descIOMaxConfidence
+	ch <- descNetTxBytes
+	ch <- descNetRetransmits
+	ch <- descNetConfidence
+	ch <- descNetMaxConfidence
 }
 
 func (c *collector) Collect(ch chan<- prometheus.Metric) {
@@ -118,6 +130,29 @@ func (c *collector) Collect(ch chan<- prometheus.Metric) {
 		}
 		seen[v.Pod] = true
 		ch <- prometheus.MustNewConstMetric(descIOLatP99, prometheus.GaugeValue, v.P99us, v.Pod)
+	}
+
+	ch <- prometheus.MustNewConstMetric(descNetMaxConfidence, prometheus.GaugeValue, s.NetMaxConfidence)
+
+	seen = map[string]bool{}
+	for _, o := range s.NetOffenders {
+		if seen[o.Pod] {
+			continue
+		}
+		seen[o.Pod] = true
+		ch <- prometheus.MustNewConstMetric(descNetTxBytes, prometheus.GaugeValue, o.MB*1e6, o.Pod)
+		if o.Confidence >= 0 {
+			ch <- prometheus.MustNewConstMetric(descNetConfidence, prometheus.GaugeValue, o.Confidence, o.Pod)
+		}
+	}
+
+	seen = map[string]bool{}
+	for _, v := range s.NetVictims {
+		if seen[v.Pod] {
+			continue
+		}
+		seen[v.Pod] = true
+		ch <- prometheus.MustNewConstMetric(descNetRetransmits, prometheus.GaugeValue, float64(v.Retransmits), v.Pod)
 	}
 }
 

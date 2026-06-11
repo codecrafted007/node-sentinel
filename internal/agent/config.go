@@ -54,6 +54,15 @@ type Config struct {
 	// p99 is trusted (the I/O analogue of MinSamples).
 	MinOps int
 
+	// --- network dimension ---
+
+	// RetransWarn is the TCP retransmit count in an interval a pod must exceed
+	// to count as a network victim.
+	RetransWarn int
+	// MinSegs is how many sendmsg calls a cgroup needs before its retransmits
+	// are judged (enough network activity to be meaningful).
+	MinSegs int
+
 	// --- observability surfaces ---
 
 	// MetricsAddr is the Prometheus /metrics listen address ("" disables it).
@@ -77,7 +86,9 @@ func DefaultConfig() Config {
 		BaselineWarmup:      3,
 		ConfidenceThreshold: 0.7,
 		IOWarn:              20 * time.Millisecond,
-		MinOps:             20,
+		MinOps:              20,
+		RetransWarn:         10,
+		MinSegs:             50,
 		MetricsAddr:         ":2112",
 		LocalSocket:         "/var/run/sentinel/agent.sock",
 	}

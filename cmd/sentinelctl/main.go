@@ -91,8 +91,8 @@ func render(s report.Snapshot) {
 		return
 	}
 
-	fmt.Printf("node-sentinel  %s   [!] CONTENTION — CPU: %d victim(s), I/O: %d victim(s)\n\n",
-		s.Time, len(s.Victims), len(s.IOVictims))
+	fmt.Printf("node-sentinel  %s   [!] CONTENTION — CPU: %d, I/O: %d, NET: %d victim(s)\n\n",
+		s.Time, len(s.Victims), len(s.IOVictims), len(s.NetVictims))
 
 	if len(s.Victims) > 0 {
 		fmt.Printf("── CPU ──  %s\n", attribution(s.MaxConfidence, s.ConfidenceMin))
@@ -114,6 +114,22 @@ func render(s report.Snapshot) {
 				trunc(o.Pod, 44), o.MB, o.SharePct, o.Ops, confStr(o.Confidence))
 		}
 		printVictims("I/O latency", s.IOVictims)
+	}
+
+	if len(s.NetVictims) > 0 {
+		fmt.Printf("\n── NETWORK ──  %s\n", attribution(s.NetMaxConfidence, s.ConfidenceMin))
+		fmt.Printf("OFFENDERS — by TX throughput\n")
+		fmt.Printf("%-44s %10s %9s %8s %10s\n", "POD", "TX_MB", "SHARE", "SEGS", "CONFIDENCE")
+		for _, o := range s.NetOffenders {
+			fmt.Printf("%-44s %10.1f %8.1f%% %8d %10s\n",
+				trunc(o.Pod, 44), o.MB, o.SharePct, o.Segs, confStr(o.Confidence))
+		}
+		fmt.Printf("VICTIMS — by TCP retransmits\n")
+		fmt.Printf("%-44s %12s %10s %9s %8s\n", "POD", "RETRANSMITS", "RATE", "xBASELINE", "SEGS")
+		for _, v := range s.NetVictims {
+			fmt.Printf("%-44s %12d %9.1f%% %9s %8d\n",
+				trunc(v.Pod, 44), v.Retransmits, v.RatePct, degStr(v.Degradation), v.Segs)
+		}
 	}
 }
 
