@@ -86,37 +86,54 @@ func render(s report.Snapshot) {
 		return
 	}
 	if s.Healthy {
-		fmt.Printf("node-sentinel  %s   [OK] HEALTHY — no CPU contention (%d cgroups; threshold p99>=%.0fus, >=%d samples)\n",
-			s.Time, s.CgroupsSeen, s.RunqWarnUs, s.MinSamples)
+		fmt.Printf("node-sentinel  %s   [OK] HEALTHY — no contention (CPU + disk I/O nominal; %d cgroups)\n",
+			s.Time, s.CgroupsSeen)
 		return
 	}
 
-	fmt.Printf("node-sentinel  %s   [!] CPU CONTENTION — %d pod(s) starved\n", s.Time, len(s.Victims))
-	fmt.Printf("%s\n\n", attribution(s))
+	fmt.Printf("node-sentinel  %s   [!] CONTENTION — CPU: %d victim(s), I/O: %d victim(s)\n\n",
+		s.Time, len(s.Victims), len(s.IOVictims))
 
-	fmt.Printf("OFFENDERS — by CPU time\n")
-	fmt.Printf("%-44s %9s %9s %7s %10s  %s\n", "POD", "CPU_MS", "INTENSITY", "REQ_m", "CONFIDENCE", "VERDICT")
-	for _, o := range s.Offenders {
-		fmt.Printf("%-44s %9.0f %8.1f%% %7s %10s  %s\n",
-			trunc(o.Pod, 44), o.CPUms, o.Intensity, reqStr(o.ReqMilli), confStr(o.Confidence), o.Verdict)
+	if len(s.Victims) > 0 {
+		fmt.Printf("── CPU ──  %s\n", attribution(s.MaxConfidence, s.ConfidenceMin))
+		fmt.Printf("OFFENDERS — by CPU time\n")
+		fmt.Printf("%-44s %9s %9s %7s %10s  %s\n", "POD", "CPU_MS", "INTENSITY", "REQ_m", "CONFIDENCE", "VERDICT")
+		for _, o := range s.Offenders {
+			fmt.Printf("%-44s %9.0f %8.1f%% %7s %10s  %s\n",
+				trunc(o.Pod, 44), o.CPUms, o.Intensity, reqStr(o.ReqMilli), confStr(o.Confidence), o.Verdict)
+		}
+		printVictims("run-queue latency", s.Victims)
 	}
 
-	fmt.Printf("\nVICTIMS — by run-queue latency\n")
-	fmt.Printf("%-44s %12s %12s %9s %10s\n", "POD", "RUNQ_P50_US", "RUNQ_P99_US", "xBASELINE", "EVENTS")
-	for _, v := range s.Victims {
+	if len(s.IOVictims) > 0 {
+		fmt.Printf("\n── DISK I/O ──  %s\n", attribution(s.IOMaxConfidence, s.ConfidenceMin))
+		fmt.Printf("OFFENDERS — by disk throughput\n")
+		fmt.Printf("%-44s %10s %9s %8s %10s\n", "POD", "MB", "SHARE", "OPS", "CONFIDENCE")
+		for _, o := range s.IOOffenders {
+			fmt.Printf("%-44s %10.1f %8.1f%% %8d %10s\n",
+				trunc(o.Pod, 44), o.MB, o.SharePct, o.Ops, confStr(o.Confidence))
+		}
+		printVictims("I/O latency", s.IOVictims)
+	}
+}
+
+func printVictims(metric string, rows []report.Victim) {
+	fmt.Printf("VICTIMS — by %s\n", metric)
+	fmt.Printf("%-44s %12s %12s %9s %10s\n", "POD", "P50_US", "P99_US", "xBASELINE", "EVENTS")
+	for _, v := range rows {
 		fmt.Printf("%-44s %12.0f %12.0f %9s %10d\n",
 			trunc(v.Pod, 44), v.P50us, v.P99us, degStr(v.Degradation), v.Events)
 	}
 }
 
-func attribution(s report.Snapshot) string {
+func attribution(maxConf, threshold float64) string {
 	switch {
-	case s.MaxConfidence < 0:
+	case maxConf < 0:
 		return "attribution: top consumer is unattributed (likely a system process) — no pod offender"
-	case s.MaxConfidence >= s.ConfidenceMin:
-		return fmt.Sprintf("attribution: confident pod offender (%.0f%% >= %.0f%% threshold)", s.MaxConfidence*100, s.ConfidenceMin*100)
+	case maxConf >= threshold:
+		return fmt.Sprintf("attribution: confident pod offender (%.0f%% >= %.0f%% threshold)", maxConf*100, threshold*100)
 	default:
-		return fmt.Sprintf("attribution: low confidence (%.0f%% < %.0f%% threshold) — alert only", s.MaxConfidence*100, s.ConfidenceMin*100)
+		return fmt.Sprintf("attribution: low confidence (%.0f%% < %.0f%% threshold) — alert only", maxConf*100, threshold*100)
 	}
 }
 

@@ -10,7 +10,7 @@ Kubernetes shares node resources (CPU run queues, disk I/O queues, NIC queues) a
 
 ## Status — Phase 1 (Foundation) complete
 
-The per-node **agent** works end-to-end: it loads an eBPF scheduler observer, resolves cgroups to Kubernetes pods, and — crucially — **stays quiet unless the node is genuinely contended**. A stable cluster logs one line per interval; when a pod is actually starved of CPU it prints two views: **offenders** (who's over-using CPU vs. their request) and **victims** (who's waiting for it). The controller (policy decision/remediation) is not built yet — see the roadmap in design §23.
+The per-node **agent** works end-to-end: it loads eBPF observers for **CPU scheduling and disk I/O**, resolves cgroups to Kubernetes pods, and — crucially — **stays quiet unless the node is genuinely contended**. A stable cluster logs one line per interval; when a pod is actually starved (of CPU or disk I/O) it prints per-dimension **offenders** (who's over-using the resource) and **victims** (who's waiting for it), each judged against a learned baseline with a confidence score. The controller (policy decision/remediation) is not built yet — see the roadmap in design §23.
 
 Stable node — just a heartbeat:
 
@@ -83,6 +83,8 @@ sudo ./bin/agent --interval 5s --top 12
 | `--min-samples` | `100` | run-queue samples a pod needs before its p99 is trusted (kills small-sample noise) |
 | `--deviation` | `3.0` | once a pod's baseline is warm, how many × its *own* normal p99 counts as a victim |
 | `--confidence` | `0.7` | offender confidence needed to name a pod the noisy neighbour (else alert-only) |
+| `--io-warn` | `20ms` | disk I/O p99 latency a pod must exceed to count as an I/O victim |
+| `--min-ops` | `20` | completed I/O requests a pod needs before its I/O p99 is trusted |
 | `--metrics-addr` | `:2112` | Prometheus `/metrics` listen address (empty to disable) |
 | `--local-socket` | `/var/run/sentinel/agent.sock` | unix socket for `sentinelctl` (empty to disable) |
 | `--cri-socket` | `unix:///run/containerd/containerd.sock` | CRI endpoint for pod resolution |
@@ -108,7 +110,11 @@ The agent publishes the same judgement to three places each interval: stdout, a 
 | `sentinel_pod_runqueue_p50_microseconds` | gauge | `pod` | victim pod's run-queue p50 |
 | `sentinel_pod_runqueue_degradation` | gauge | `pod` | victim pod's p99 ÷ its own learned baseline |
 | `sentinel_pod_offender_confidence` | gauge | `pod` | confidence (0–1) this pod is the noisy neighbour |
-| `sentinel_max_offender_confidence` | gauge | — | highest offender confidence this interval (−1 if none attributable) |
+| `sentinel_max_offender_confidence` | gauge | — | highest CPU offender confidence this interval (−1 if none attributable) |
+| `sentinel_pod_io_bytes` | gauge | `pod` | offender pod's disk bytes this interval |
+| `sentinel_pod_io_latency_p99_microseconds` | gauge | `pod` | I/O-victim pod's disk latency p99 |
+| `sentinel_pod_io_offender_confidence` | gauge | `pod` | confidence (0–1) this pod is the disk noisy neighbour |
+| `sentinel_max_io_offender_confidence` | gauge | — | highest disk-I/O offender confidence this interval |
 
 Per-pod series are emitted only for the pods currently in the offender/victim lists, so cardinality is bounded and a healthy node emits just the two node-level gauges. `sentinel_node_contended` is the one to alert on; `sentinel_max_offender_confidence` tells you whether a specific pod can be blamed.
 

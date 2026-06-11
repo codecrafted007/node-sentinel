@@ -19,6 +19,7 @@ import (
 // needs clang and a vmlinux.h dumped from the host's BTF (`make vmlinux`).
 //
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target bpfel -type sched_hist sched bpf/sched_monitor.bpf.c -- -I./bpf -O2 -g -Wall
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target bpfel -type blkio_hist blkio bpf/blkio_monitor.bpf.c -- -I./bpf -O2 -g -Wall
 
 // SchedObserver loads sched_monitor, attaches its tracepoints, and exposes the
 // per-cgroup run-queue latency map for reading.

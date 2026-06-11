@@ -12,9 +12,24 @@ type Snapshot struct {
 	RunqWarnUs    float64    `json:"runq_warn_us"`
 	MinSamples    int        `json:"min_samples"`
 	ConfidenceMin float64    `json:"confidence_min"` // confidence needed to call a pod the offender
-	MaxConfidence float64    `json:"max_confidence"` // highest offender confidence this interval (0-1, -1 if none attributable)
-	Offenders     []Offender `json:"offenders"`
-	Victims       []Victim   `json:"victims"`
+	MaxConfidence float64    `json:"max_confidence"` // highest CPU offender confidence this interval (0-1, -1 if none attributable)
+	Offenders     []Offender `json:"offenders"`      // CPU offenders
+	Victims       []Victim   `json:"victims"`        // CPU victims (run-queue latency)
+
+	// Disk I/O dimension (empty when there's no I/O contention).
+	IOMaxConfidence float64      `json:"io_max_confidence"`
+	IOOffenders     []IOOffender `json:"io_offenders"`
+	IOVictims       []Victim     `json:"io_victims"` // P50/P99 are I/O latency µs; Events are ops
+}
+
+// IOOffender is a cgroup ranked by disk throughput — the disk equivalent of a
+// CPU offender.
+type IOOffender struct {
+	Pod        string  `json:"pod"`
+	MB         float64 `json:"mb"`
+	SharePct   float64 `json:"share"`      // percent of disk bytes this interval
+	Ops        uint64  `json:"ops"`
+	Confidence float64 `json:"confidence"` // 0-1; -1 = not attributable
 }
 
 // Offender is a cgroup ranked by CPU time, judged against its fair share.

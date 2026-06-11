@@ -5,6 +5,8 @@
 *.o
 internal/ebpf/sched_bpfel.go
 internal/ebpf/sched_bpfeb.go
+internal/ebpf/blkio_bpfel.go
+internal/ebpf/blkio_bpfeb.go
 
 # Machine-specific BTF dump (regenerated per-host via `make vmlinux`)
 internal/ebpf/bpf/vmlinux.h

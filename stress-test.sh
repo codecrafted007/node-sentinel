@@ -75,7 +75,7 @@ verdict() { # message  ok(1/0)
 log "PHASE 1 — BASELINE (expect: healthy)"
 out=$(run_agent); printf '%s\n' "$out"
 healthy=$(count "$out" "healthy")
-contention=$(count "$out" "CPU CONTENTION")
+contention=$(count "$out" "CONTENTION")
 [ "$healthy" -ge 1 ] && [ "$contention" -eq 0 ] && ok=1 || ok=0
 verdict "stays quiet when healthy (healthy=$healthy, contention=$contention)" "$ok"
 
@@ -84,7 +84,7 @@ log "PHASE 2 — UNDER STRESS: $WORKERS CPU hogs on $(nproc) cores (expect: cont
 systemd-run --unit="$UNIT" --collect stress-ng --cpu "$WORKERS" --timeout "${DURATION}s" >/dev/null
 sleep 2
 out=$(run_agent); printf '%s\n' "$out"
-contention=$(count "$out" "CPU CONTENTION")
+contention=$(count "$out" "CONTENTION")
 [ "$contention" -ge 1 ] && ok=1 || ok=0
 verdict "detects contention under stress (contention=$contention)" "$ok"
 

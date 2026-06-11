@@ -89,7 +89,15 @@ Goal: prove kernel→Go run-queue-latency attribution with a standalone agent (d
 
 **Phase 1 (Foundation) is complete** — design §23 exit criteria met: BPF loads verifier-clean, run-queue latency attributed per pod, `sentinelctl top`/`status` works, overhead < 1% CPU. Plus we front-loaded the offender signal, the contention judgement layer, adaptive baselines, and confidence scoring.
 
-## Up next — the control plane (Phases 2–3)
+## Phase 2 — Broader observers
 
-- Broaden observers: disk I/O (`blkio`) and network (`net`) — reuse the resolver, baseline, confidence, and both surfaces.
+### Disk-I/O observer (`blkio`)
+- `internal/ebpf/bpf/blkio_monitor.bpf.c` — `block_rq_insert`/`block_rq_complete` (tp_btf); per-cgroup I/O latency histogram + throughput, attributed via the issuing cgroup captured at insert (buffered writeback attributes to the kernel/root cgroup — a documented limitation). `internal/ebpf/blkio.go` loader + reader; second bpf2go generation in the same package.
+- **Generalized the judgement to N dimensions**: extracted a shared `victims()` (floor + baseline-deviation) used by both CPU run-queue latency and I/O latency; offenders per dimension (CPU by intensity vs request, I/O by disk throughput share); each with its own baseline + confidence + attribution. Healthy unless a pod is starved of CPU **or** disk I/O.
+- Surfaced: stdout + sentinelctl now show per-dimension sections; new metrics (`sentinel_pod_io_bytes`, `sentinel_pod_io_latency_p99_microseconds`, `sentinel_pod_io_offender_confidence`, `sentinel_max_io_offender_confidence`). New flags `--io-warn`, `--min-ops`.
+- Live-validated: blkio observer loads verifier-clean; under `dd` disk load the offender table shows the writer at 99.5% throughput share and I/O victims by latency, with honest attribution (system hog → no confident pod offender). CPU acceptance test still PASS; overhead unchanged. Proved the observer model generalizes beyond CPU.
+
+## Up next — finish observers + the controller (Phases 2–3)
+
+- Network observer (`net`): TCP retransmits, packet drops, NIC queue latency — same treatment, last observer before the controller.
 - Build the **controller**: gRPC agent→controller stream, `NodeHealthPolicy` CRD, decision engine, and remediation (taint/cordon/evict) that *acts* on high-confidence offenders — the last 🔜 in CONCEPTS.md.

@@ -26,6 +26,8 @@ func main() {
 	flag.DurationVar(&cfg.RunqWarn, "runq-warn", cfg.RunqWarn, "run-queue p99 a pod must exceed to count as contention")
 	flag.Float64Var(&cfg.DeviationFactor, "deviation", cfg.DeviationFactor, "x over a pod's own baseline p99 to count as a victim (once warm)")
 	flag.Float64Var(&cfg.ConfidenceThreshold, "confidence", cfg.ConfidenceThreshold, "offender confidence needed to name a pod the noisy neighbour")
+	flag.DurationVar(&cfg.IOWarn, "io-warn", cfg.IOWarn, "disk I/O p99 latency a pod must exceed to count as an I/O victim")
+	flag.IntVar(&cfg.MinOps, "min-ops", cfg.MinOps, "min completed I/O requests before a cgroup's I/O p99 is trusted")
 	flag.StringVar(&cfg.MetricsAddr, "metrics-addr", cfg.MetricsAddr, "Prometheus /metrics listen address (empty to disable)")
 	flag.StringVar(&cfg.LocalSocket, "local-socket", cfg.LocalSocket, "unix socket for sentinelctl (empty to disable)")
 	flag.Parse()

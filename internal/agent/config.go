@@ -46,6 +46,14 @@ type Config struct {
 	// pod the noisy neighbour (and, in future, act on it). Below it we alert only.
 	ConfidenceThreshold float64
 
+	// --- disk I/O dimension ---
+
+	// IOWarn is the I/O latency p99 a pod must exceed to count as an I/O victim.
+	IOWarn time.Duration
+	// MinOps is how many completed I/O requests a cgroup needs before its I/O
+	// p99 is trusted (the I/O analogue of MinSamples).
+	MinOps int
+
 	// --- observability surfaces ---
 
 	// MetricsAddr is the Prometheus /metrics listen address ("" disables it).
@@ -68,6 +76,8 @@ func DefaultConfig() Config {
 		BaselineAlpha:       0.15,
 		BaselineWarmup:      3,
 		ConfidenceThreshold: 0.7,
+		IOWarn:              20 * time.Millisecond,
+		MinOps:             20,
 		MetricsAddr:         ":2112",
 		LocalSocket:         "/var/run/sentinel/agent.sock",
 	}

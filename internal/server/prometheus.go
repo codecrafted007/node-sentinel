@@ -30,6 +30,14 @@ var (
 		"confidence that an offender pod is the noisy neighbour (0-1)", []string{"pod"}, nil)
 	descDegradation = prometheus.NewDesc("sentinel_pod_runqueue_degradation",
 		"victim pod's run-queue p99 relative to its own baseline", []string{"pod"}, nil)
+	descIOBytes = prometheus.NewDesc("sentinel_pod_io_bytes",
+		"offender pod's disk bytes this interval", []string{"pod"}, nil)
+	descIOLatP99 = prometheus.NewDesc("sentinel_pod_io_latency_p99_microseconds",
+		"I/O-victim pod's disk latency p99", []string{"pod"}, nil)
+	descIOConfidence = prometheus.NewDesc("sentinel_pod_io_offender_confidence",
+		"confidence that a pod is the disk noisy neighbour (0-1)", []string{"pod"}, nil)
+	descIOMaxConfidence = prometheus.NewDesc("sentinel_max_io_offender_confidence",
+		"highest disk-I/O offender confidence this interval (-1 if none attributable)", nil, nil)
 )
 
 // collector emits metrics from the latest snapshot at scrape time, so series
@@ -46,6 +54,10 @@ func (c *collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descMaxConfidence
 	ch <- descConfidence
 	ch <- descDegradation
+	ch <- descIOBytes
+	ch <- descIOLatP99
+	ch <- descIOConfidence
+	ch <- descIOMaxConfidence
 }
 
 func (c *collector) Collect(ch chan<- prometheus.Metric) {
@@ -83,6 +95,29 @@ func (c *collector) Collect(ch chan<- prometheus.Metric) {
 		if v.Degradation > 0 {
 			ch <- prometheus.MustNewConstMetric(descDegradation, prometheus.GaugeValue, v.Degradation, v.Pod)
 		}
+	}
+
+	ch <- prometheus.MustNewConstMetric(descIOMaxConfidence, prometheus.GaugeValue, s.IOMaxConfidence)
+
+	seen = map[string]bool{}
+	for _, o := range s.IOOffenders {
+		if seen[o.Pod] {
+			continue
+		}
+		seen[o.Pod] = true
+		ch <- prometheus.MustNewConstMetric(descIOBytes, prometheus.GaugeValue, o.MB*1e6, o.Pod)
+		if o.Confidence >= 0 {
+			ch <- prometheus.MustNewConstMetric(descIOConfidence, prometheus.GaugeValue, o.Confidence, o.Pod)
+		}
+	}
+
+	seen = map[string]bool{}
+	for _, v := range s.IOVictims {
+		if seen[v.Pod] {
+			continue
+		}
+		seen[v.Pod] = true
+		ch <- prometheus.MustNewConstMetric(descIOLatP99, prometheus.GaugeValue, v.P99us, v.Pod)
 	}
 }
 

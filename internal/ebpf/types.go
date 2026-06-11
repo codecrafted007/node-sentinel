@@ -20,3 +20,13 @@ type CgroupCPUTime struct {
 	CgroupID uint64
 	OnCpuNs  uint64
 }
+
+// CgroupBlkio is the block-I/O latency histogram + throughput for one cgroup
+// over a read interval, after summing the per-CPU copies.
+type CgroupBlkio struct {
+	CgroupID uint64
+	Slots    []uint64 // log2 histogram of I/O latency (µs)
+	TotalUs  uint64   // summed latency, for the mean
+	Count    uint64   // completed requests (ops)
+	Bytes    uint64   // total bytes moved
+}

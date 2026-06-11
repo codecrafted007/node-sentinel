@@ -21,6 +21,8 @@ Every contention problem has two sides, and we measure them separately:
 
 A key subtlety: the hog is often *busy*, not *waiting* — so the victims are the ones who light up the "waiting" meter. That's why we need both measurements to see the whole story.
 
+The same offender/victim idea applies to **every shared facility**. Today the manager watches the **kitchen (CPU)** and the **bathroom (disk I/O)** — a pod hammering the disk makes its neighbours' reads and writes wait, exactly like the CPU case. The **front door (network)** is next. Everything below (learn-the-normal, unusual-and-bad, how-much, confidence) is applied per facility.
+
 ## The problem: one rule doesn't fit everyone ✅ (this is today's limitation)
 
 Right now the manager uses **one fixed rule** to decide if a tenant is suffering: "did they wait more than 5 minutes for the stove?"
