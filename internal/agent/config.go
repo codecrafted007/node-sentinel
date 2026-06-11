@@ -28,7 +28,23 @@ type Config struct {
 	MinSamples int
 	// RunqWarn is the run-queue p99 a pod must exceed to count as a victim of
 	// contention. Below it, the wait is normal time-sharing, not a problem.
+	// This absolute floor is the primary, restart-safe signal; the baseline
+	// below only refines it once warm.
 	RunqWarn time.Duration
+
+	// --- adaptive baseline + confidence (design §7.5) ---
+
+	// DeviationFactor: once a pod's baseline is warm, its current run-queue p99
+	// must be at least this many times its own normal to count as a victim
+	// (so a pod that is *always* a bit slow isn't flagged for being itself).
+	DeviationFactor float64
+	// BaselineAlpha is the EMA smoothing for the learned normal (0-1; higher
+	// reacts faster). BaselineWarmup is how many intervals before it's trusted.
+	BaselineAlpha  float64
+	BaselineWarmup int
+	// ConfidenceThreshold is the offender confidence needed before we'd call a
+	// pod the noisy neighbour (and, in future, act on it). Below it we alert only.
+	ConfidenceThreshold float64
 
 	// --- observability surfaces ---
 
@@ -46,9 +62,13 @@ func DefaultConfig() Config {
 		CRISocket:      "unix:///run/containerd/containerd.sock",
 		CgroupRoot:     "/sys/fs/cgroup/kubepods.slice",
 		ResolveRefresh: 30 * time.Second,
-		MinSamples:     100,
-		RunqWarn:       5 * time.Millisecond,
-		MetricsAddr:    ":2112",
-		LocalSocket:    "/var/run/sentinel/agent.sock",
+		MinSamples:          100,
+		RunqWarn:            5 * time.Millisecond,
+		DeviationFactor:     3.0,
+		BaselineAlpha:       0.15,
+		BaselineWarmup:      3,
+		ConfidenceThreshold: 0.7,
+		MetricsAddr:         ":2112",
+		LocalSocket:         "/var/run/sentinel/agent.sock",
 	}
 }

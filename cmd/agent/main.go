@@ -24,6 +24,8 @@ func main() {
 	flag.StringVar(&cfg.CgroupRoot, "cgroup-root", cfg.CgroupRoot, "cgroups v2 subtree to scan for pods")
 	flag.IntVar(&cfg.MinSamples, "min-samples", cfg.MinSamples, "min run-queue samples before a pod counts as a victim")
 	flag.DurationVar(&cfg.RunqWarn, "runq-warn", cfg.RunqWarn, "run-queue p99 a pod must exceed to count as contention")
+	flag.Float64Var(&cfg.DeviationFactor, "deviation", cfg.DeviationFactor, "x over a pod's own baseline p99 to count as a victim (once warm)")
+	flag.Float64Var(&cfg.ConfidenceThreshold, "confidence", cfg.ConfidenceThreshold, "offender confidence needed to name a pod the noisy neighbour")
 	flag.StringVar(&cfg.MetricsAddr, "metrics-addr", cfg.MetricsAddr, "Prometheus /metrics listen address (empty to disable)")
 	flag.StringVar(&cfg.LocalSocket, "local-socket", cfg.LocalSocket, "unix socket for sentinelctl (empty to disable)")
 	flag.Parse()

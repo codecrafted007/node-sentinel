@@ -24,6 +24,12 @@ var (
 		"victim pod's run-queue p99 latency", []string{"pod"}, nil)
 	descRunqP50 = prometheus.NewDesc("sentinel_pod_runqueue_p50_microseconds",
 		"victim pod's run-queue p50 latency", []string{"pod"}, nil)
+	descMaxConfidence = prometheus.NewDesc("sentinel_max_offender_confidence",
+		"highest offender confidence this interval (0-1; -1 if none attributable)", nil, nil)
+	descConfidence = prometheus.NewDesc("sentinel_pod_offender_confidence",
+		"confidence that an offender pod is the noisy neighbour (0-1)", []string{"pod"}, nil)
+	descDegradation = prometheus.NewDesc("sentinel_pod_runqueue_degradation",
+		"victim pod's run-queue p99 relative to its own baseline", []string{"pod"}, nil)
 )
 
 // collector emits metrics from the latest snapshot at scrape time, so series
@@ -37,6 +43,9 @@ func (c *collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descCPUms
 	ch <- descRunqP99
 	ch <- descRunqP50
+	ch <- descMaxConfidence
+	ch <- descConfidence
+	ch <- descDegradation
 }
 
 func (c *collector) Collect(ch chan<- prometheus.Metric) {
@@ -48,6 +57,7 @@ func (c *collector) Collect(ch chan<- prometheus.Metric) {
 	}
 	ch <- prometheus.MustNewConstMetric(descContended, prometheus.GaugeValue, contended)
 	ch <- prometheus.MustNewConstMetric(descCgroups, prometheus.GaugeValue, float64(s.CgroupsSeen))
+	ch <- prometheus.MustNewConstMetric(descMaxConfidence, prometheus.GaugeValue, s.MaxConfidence)
 
 	seen := map[string]bool{}
 	for _, o := range s.Offenders {
@@ -57,6 +67,9 @@ func (c *collector) Collect(ch chan<- prometheus.Metric) {
 		seen[o.Pod] = true
 		ch <- prometheus.MustNewConstMetric(descIntensity, prometheus.GaugeValue, o.Intensity/100, o.Pod)
 		ch <- prometheus.MustNewConstMetric(descCPUms, prometheus.GaugeValue, o.CPUms, o.Pod)
+		if o.Confidence >= 0 {
+			ch <- prometheus.MustNewConstMetric(descConfidence, prometheus.GaugeValue, o.Confidence, o.Pod)
+		}
 	}
 
 	seen = map[string]bool{}
@@ -67,6 +80,9 @@ func (c *collector) Collect(ch chan<- prometheus.Metric) {
 		seen[v.Pod] = true
 		ch <- prometheus.MustNewConstMetric(descRunqP99, prometheus.GaugeValue, v.P99us, v.Pod)
 		ch <- prometheus.MustNewConstMetric(descRunqP50, prometheus.GaugeValue, v.P50us, v.Pod)
+		if v.Degradation > 0 {
+			ch <- prometheus.MustNewConstMetric(descDegradation, prometheus.GaugeValue, v.Degradation, v.Pod)
+		}
 	}
 }
 

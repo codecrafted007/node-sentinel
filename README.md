@@ -18,22 +18,22 @@ Stable node — just a heartbeat:
 12:30:05  [OK] healthy — no CPU contention (no pod above run-queue p99 5ms with >=100 samples; 77 cgroups seen)
 ```
 
-Under real contention (a CPU hog running):
+Under real contention (a CPU hog running, baseline warmed up):
 
 ```
-12:31:10  [!] CPU CONTENTION — 6 pod(s) starved on the run queue
+01:47:08  [!] CPU CONTENTION — 7 pod(s) starved on the run queue
+  attribution: low confidence (6% < 70% threshold) — alert only
   OFFENDERS — by CPU time
-  POD                                            CPU_MS  INTENSITY  REQ_mCPU  VERDICT
-  system(cg:1599902)                              55968      91.3%         -  system / unattributed
-  default/kafka-0/kafka                            1754       2.9%       250  within request (14.5%)
-  default/batch-job-x/worker                       1200       2.0%         0  no request (best-effort)
+  POD                                    CPU_MS INTENSITY  REQ_m CONFIDENCE  VERDICT
+  system(cg:2660936)                      53673     89.9%      -          —  system / unattributed
+  default/kafka-0/kafka                    1720      2.9%    250         0%  within request (14.5%)
   VICTIMS — by run-queue latency (p99 >= 5ms, >=100 samples)
-  POD                                         RUNQ_P50_US  RUNQ_P99_US     EVENTS
-  default/redis-headless-0/redis                     1536        12288        263
-  default/config-relay-qxp4w/config-relay              24         6144        211
+  POD                              RUNQ_P50_US  RUNQ_P99_US xBASELINE     EVENTS
+  default/udpx-p6t9s/udpx                   48         6144    104.8x      42178
+  kube-system/calico-…/controllers          24        24576     26.6x        226
 ```
 
-> Two signals from one tracepoint: **CPU intensity** (offender — a pod's share of CPU consumed, judged against the **fair share** implied by its request) and **run-queue latency** (victim — how long a pod waited for a CPU). The gate (`--runq-warn`, `--min-samples`) keeps healthy nodes silent. Adaptive baselines, temporal correlation, and confidence scoring come next (design §7.5).
+> Two signals from one tracepoint: **CPU intensity** (offender — share of CPU consumed, judged against the pod's request) and **run-queue latency** (victim — how long it waited). On top of those: each victim's **xBASELINE** shows how far it's degraded from its *own* learned normal, and each offender gets a **confidence** score. The `attribution` line is the honest verdict — here it refuses to blame a pod because the real hog is a system process. See [`CONCEPTS.md`](CONCEPTS.md) for the plain-English model. Still to come: *acting* on high-confidence offenders (the controller).
 
 ---
 
@@ -79,8 +79,10 @@ sudo ./bin/agent --interval 5s --top 12
 |------|---------|---------|
 | `--interval` | `5s` | how often maps are read and a report is printed |
 | `--top` | `20` | how many cgroups to show per table |
-| `--runq-warn` | `5ms` | run-queue p99 a pod must exceed to count as a victim of contention |
+| `--runq-warn` | `5ms` | run-queue p99 a pod must exceed to count as a victim (the absolute floor) |
 | `--min-samples` | `100` | run-queue samples a pod needs before its p99 is trusted (kills small-sample noise) |
+| `--deviation` | `3.0` | once a pod's baseline is warm, how many × its *own* normal p99 counts as a victim |
+| `--confidence` | `0.7` | offender confidence needed to name a pod the noisy neighbour (else alert-only) |
 | `--metrics-addr` | `:2112` | Prometheus `/metrics` listen address (empty to disable) |
 | `--local-socket` | `/var/run/sentinel/agent.sock` | unix socket for `sentinelctl` (empty to disable) |
 | `--cri-socket` | `unix:///run/containerd/containerd.sock` | CRI endpoint for pod resolution |
@@ -104,8 +106,11 @@ The agent publishes the same judgement to three places each interval: stdout, a 
 | `sentinel_pod_cpu_milliseconds` | gauge | `pod` | offender pod's on-CPU ms this interval |
 | `sentinel_pod_runqueue_p99_microseconds` | gauge | `pod` | victim pod's run-queue p99 |
 | `sentinel_pod_runqueue_p50_microseconds` | gauge | `pod` | victim pod's run-queue p50 |
+| `sentinel_pod_runqueue_degradation` | gauge | `pod` | victim pod's p99 ÷ its own learned baseline |
+| `sentinel_pod_offender_confidence` | gauge | `pod` | confidence (0–1) this pod is the noisy neighbour |
+| `sentinel_max_offender_confidence` | gauge | — | highest offender confidence this interval (−1 if none attributable) |
 
-Per-pod series are emitted only for the pods currently in the offender/victim lists, so cardinality is bounded and a healthy node emits just the two node-level gauges. `sentinel_node_contended` is the one to alert on.
+Per-pod series are emitted only for the pods currently in the offender/victim lists, so cardinality is bounded and a healthy node emits just the two node-level gauges. `sentinel_node_contended` is the one to alert on; `sentinel_max_offender_confidence` tells you whether a specific pod can be blamed.
 
 **`sentinelctl`** — the on-node CLI (read-only, over the agent's unix socket):
 

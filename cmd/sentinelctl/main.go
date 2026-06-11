@@ -91,23 +91,54 @@ func render(s report.Snapshot) {
 		return
 	}
 
-	fmt.Printf("node-sentinel  %s   [!] CPU CONTENTION — %d pod(s) starved\n\n", s.Time, len(s.Victims))
+	fmt.Printf("node-sentinel  %s   [!] CPU CONTENTION — %d pod(s) starved\n", s.Time, len(s.Victims))
+	fmt.Printf("%s\n\n", attribution(s))
 
 	fmt.Printf("OFFENDERS — by CPU time\n")
-	fmt.Printf("%-44s %10s %10s %9s  %s\n", "POD", "CPU_MS", "INTENSITY", "REQ_mCPU", "VERDICT")
+	fmt.Printf("%-44s %9s %9s %7s %10s  %s\n", "POD", "CPU_MS", "INTENSITY", "REQ_m", "CONFIDENCE", "VERDICT")
 	for _, o := range s.Offenders {
-		req := "-"
-		if o.ReqMilli >= 0 {
-			req = fmt.Sprintf("%d", o.ReqMilli)
-		}
-		fmt.Printf("%-44s %10.0f %9.1f%% %9s  %s\n", trunc(o.Pod, 44), o.CPUms, o.Intensity, req, o.Verdict)
+		fmt.Printf("%-44s %9.0f %8.1f%% %7s %10s  %s\n",
+			trunc(o.Pod, 44), o.CPUms, o.Intensity, reqStr(o.ReqMilli), confStr(o.Confidence), o.Verdict)
 	}
 
 	fmt.Printf("\nVICTIMS — by run-queue latency\n")
-	fmt.Printf("%-44s %12s %12s %10s\n", "POD", "RUNQ_P50_US", "RUNQ_P99_US", "EVENTS")
+	fmt.Printf("%-44s %12s %12s %9s %10s\n", "POD", "RUNQ_P50_US", "RUNQ_P99_US", "xBASELINE", "EVENTS")
 	for _, v := range s.Victims {
-		fmt.Printf("%-44s %12.0f %12.0f %10d\n", trunc(v.Pod, 44), v.P50us, v.P99us, v.Events)
+		fmt.Printf("%-44s %12.0f %12.0f %9s %10d\n",
+			trunc(v.Pod, 44), v.P50us, v.P99us, degStr(v.Degradation), v.Events)
 	}
+}
+
+func attribution(s report.Snapshot) string {
+	switch {
+	case s.MaxConfidence < 0:
+		return "attribution: top consumer is unattributed (likely a system process) — no pod offender"
+	case s.MaxConfidence >= s.ConfidenceMin:
+		return fmt.Sprintf("attribution: confident pod offender (%.0f%% >= %.0f%% threshold)", s.MaxConfidence*100, s.ConfidenceMin*100)
+	default:
+		return fmt.Sprintf("attribution: low confidence (%.0f%% < %.0f%% threshold) — alert only", s.MaxConfidence*100, s.ConfidenceMin*100)
+	}
+}
+
+func reqStr(m int64) string {
+	if m < 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%d", m)
+}
+
+func confStr(c float64) string {
+	if c < 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%.0f%%", c*100)
+}
+
+func degStr(r float64) string {
+	if r <= 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%.1fx", r)
 }
 
 func trunc(s string, n int) string {

@@ -75,8 +75,15 @@ Goal: prove kernel→Go run-queue-latency attribution with a standalone agent (d
 - `cmd/sentinelctl`: `top` (live) and `status` (one-shot), reading the agent's socket. Pure Go, ships as a second binary (`build.sh` builds all `cmd/*`).
 - Live-validated on the box: healthy → `node_contended 0` / `[OK] HEALTHY`; under stress → `node_contended 1`, per-pod intensity series (hog at 0.88), and full offender/victim tables in `sentinelctl`.
 
-## Up next (still Phase 1)
+### Adaptive baseline + confidence (§7.5 steps 3–6)
+- `internal/metrics/baseline.go` — per-cgroup EMA of run-queue p99 (a pod's learned "normal"), with warmup, freeze-while-anomalous (so a sustained spike isn't absorbed), and prune-on-churn. Pure Go, unit-tested.
+- Victim logic: absolute floor stays the primary, restart-safe signal; once a pod's baseline is warm it's a victim only if *also* ≥ `--deviation`× its own normal — so always-slow pods stop being flagged for being themselves. Each victim reports its degradation (`xBASELINE`).
+- Offender confidence (0–1): combines how far a pod exceeds its fair share with how badly victims degraded; gated by `--confidence`. Attribution line states the verdict; unattributed system hogs and within-request pods score low/none on purpose.
+- Surfaced everywhere: stdout, `sentinelctl`, and new metrics (`sentinel_pod_runqueue_degradation`, `sentinel_pod_offender_confidence`, `sentinel_max_offender_confidence`).
+- Live-validated: acceptance test still PASS; with a warm baseline, victims showed 12–105× their own normal under stress, and confidence stayed honest (max 6% → "alert only") because the hog was a system process. Flipped CONCEPTS.md ideas 1–4 to ✅.
 
-- **Adaptive baseline + excess magnitude + confidence** — a per-pod EMA baseline (so "victim" means *degraded vs its own normal*, not just above an absolute floor), excess magnitude, temporal correlation, and a confidence score (§7.5 steps 3–6). Removes the workload-dependent `--runq-warn` guesswork; current fair-share verdict ignores magnitude (tiny-request pods read "OVER" even at low %).
+## Up next (still Phase 1 / into Phase 2)
+
 - `internal/cgroup/watcher.go` — inotify live cgroup updates (currently a periodic rescan, the design's fallback).
 - Formal overhead benchmark (< 1% CPU, design §16) to close out Phase 1.
+- Then the **control plane** (Phases 2–3): broaden to disk/network observers, and build the controller (CRD policy + remediation) that *acts* on high-confidence offenders.
