@@ -1,0 +1,82 @@
+# Single-node test overlay of the agent DaemonSet.
+#
+# Same agent as deploy/agent.yaml, but pinned to ONE node and NOT tolerating
+# every taint — so a first run on a shared cluster touches exactly one worker
+# instead of every node (incl. control-plane). Verify load + pod resolution
+# here, then switch to deploy/agent.yaml to widen.
+#
+#   1. pick a worker:   kubectl get nodes -o wide
+#   2. set the host:    replace REPLACE_WITH_NODE_HOSTNAME below with its
+#                       kubernetes.io/hostname label (usually == the node name)
+#   3. apply:           kubectl apply -f deploy/agent-singlenode.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-sentinel-agent
+  namespace: sentinel-system
+  labels:
+    app: node-sentinel-agent
+spec:
+  selector:
+    matchLabels:
+      app: node-sentinel-agent
+  template:
+    metadata:
+      labels:
+        app: node-sentinel-agent
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "2112"
+    spec:
+      serviceAccountName: node-sentinel-agent
+      hostPID: true
+      # Pin to a single node for the first test. A DaemonSet honors nodeSelector,
+      # so it schedules exactly one pod — on the node whose hostname matches.
+      nodeSelector:
+        kubernetes.io/hostname: REPLACE_WITH_NODE_HOSTNAME
+      # Deliberately NO blanket toleration here: we do not want to land on
+      # tainted/control-plane nodes during a scoped test.
+      containers:
+        - name: agent
+          image: node-sentinel:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            # Standalone for the first single-node test: no controller needed.
+            # Read results via `sentinelctl top` (kubectl exec) + /metrics.
+            # Add --controller-addr=http://node-sentinel-controller:8080 once the
+            # controller is deployed (registry path makes its image pullable too).
+            - --interval=5s
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: metrics
+              containerPort: 2112
+          securityContext:
+            privileged: false
+            capabilities:
+              add: [BPF, PERFMON, SYS_RESOURCE, SYS_PTRACE]
+              drop: [ALL]
+          volumeMounts:
+            - name: sys # /sys/kernel/btf (CO-RE) + /sys/fs/cgroup (resolver)
+              mountPath: /sys
+              readOnly: true
+            - name: cri # container runtime socket for pod resolution
+              mountPath: /run/containerd/containerd.sock
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: cri
+          hostPath:
+            path: /run/containerd/containerd.sock
+            type: Socket

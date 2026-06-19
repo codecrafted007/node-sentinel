@@ -4,7 +4,7 @@
 
 Kubernetes shares node resources (CPU run queues, disk I/O queues, NIC queues) across pods, but the scheduler can't see contention at those boundaries. When one pod saturates a shared resource, its neighbors degrade silently. node-sentinel observes the contention *inside the kernel* with eBPF, attributes it to specific pods, and (in later phases) remediates under operator-defined policy.
 
-**New here?** Start with [`CONCEPTS.md`](CONCEPTS.md) (what it does & how it decides, in plain English), then [`HOW.md`](HOW.md) (how the eBPF probe is built, embedded, and run). **Want to run it?** → [`DEPLOY.md`](DEPLOY.md) (Kubernetes manifests + bare-binary/systemd, step by step). Full design: [`docs/node-sentinel-design-v0.3.md`](docs/node-sentinel-design-v0.3.md) · dataflow & scale: [`docs/node-sentinel-internals.md`](docs/node-sentinel-internals.md) · progress log: [`PROGRESS.md`](PROGRESS.md).
+**New here?** Start with [`CONCEPTS.md`](CONCEPTS.md) (what it does & how it decides, in plain English), then [`ARCHITECTURE.md`](ARCHITECTURE.md) (three diagrams: where it runs, how data flows, inside one agent) and [`HOW.md`](HOW.md) (how the eBPF probe is built, embedded, and run). **Want to run it?** → [`DEPLOY.md`](DEPLOY.md) (Kubernetes manifests + bare-binary/systemd, step by step) · every command in one place: [`HELPERCOMMANDS.md`](HELPERCOMMANDS.md) · see it catch a noisy neighbour on a live cluster: [`DETECTION-DEMO.md`](DETECTION-DEMO.md). Full design: [`docs/node-sentinel-design-v0.3.md`](docs/node-sentinel-design-v0.3.md) · dataflow & scale: [`docs/node-sentinel-internals.md`](docs/node-sentinel-internals.md) · progress log: [`PROGRESS.md`](PROGRESS.md).
 
 ---
 
@@ -53,9 +53,26 @@ Under real contention (a CPU hog running, baseline warmed up):
 
 ---
 
-## Why you need a Linux box
+## Build with Docker (any OS — the easy path)
 
-eBPF only loads on Linux. **macOS / Windows cannot run the agent** — they can edit code and run the portable unit tests, but the kernel-facing build happens on a Linux host.
+You don't need the eBPF toolchain (clang/libbpf/bpftool/Go) on your machine — just Docker. The whole build runs in a container, so a dev on **macOS, Windows, or Linux** can produce the Linux binaries and the image:
+
+```sh
+git clone git@github.com:codecrafted007/node-sentinel.git
+cd node-sentinel
+
+./docker-build.sh binaries     # cross-arch static binaries -> bin/linux_amd64/... + bin/linux_arm64/...
+./docker-build.sh image        # node-sentinel:dev for your host arch, loaded into docker
+./docker-build.sh image --push -t <registry>/node-sentinel:<tag>   # multi-arch (amd64+arm64) manifest
+```
+
+It's fast: the BPF object is compiled **once** (our probes are `tp_btf`/`fentry`-only, so the bytecode is CPU-arch-independent), and the `CGO_ENABLED=0` Go binaries cross-compile per arch with no QEMU emulation. The CO-RE header `internal/ebpf/bpf/vmlinux.h` is committed, so the build is fully offline/hermetic — one header relocates against any running kernel ≥ 5.10 at load time. (The agent still only *runs* on Linux; see below.)
+
+Then copy the right binary onto a Linux node and run it, or deploy the image — see [`DEPLOY.md`](DEPLOY.md).
+
+## Why you still need a Linux box (to *run* it)
+
+eBPF only loads on Linux. **macOS / Windows can build (above) and run the portable unit tests, but cannot run the agent** — loading/attaching BPF needs a Linux kernel. To run the agent you need a Linux host (or the Docker build path above plus a Linux node to deploy to).
 
 **Build host requirements:**
 - Linux kernel **≥ 5.10** with BTF (`/sys/kernel/btf/vmlinux` exists) and **cgroups v2** (`stat -fc %T /sys/fs/cgroup` → `cgroup2fs`)
@@ -75,16 +92,18 @@ echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.profile && source 
 
 ---
 
-## Quick start (on the Linux host)
+## Native build (on a Linux host with the toolchain)
+
+Faster inner loop if you already have clang/libbpf/bpftool/Go installed:
 
 ```sh
 git clone git@github.com:codecrafted007/node-sentinel.git
 cd node-sentinel
 
 make setup      # one-time: fetch Go deps (cilium/ebpf, cri-api, grpc)
-make vmlinux    # dump this kernel's BTF -> internal/ebpf/bpf/vmlinux.h
-make generate   # compile the BPF C + generate Go bindings (needs clang)
+make generate   # compile the BPF C + generate Go bindings (needs clang; vmlinux.h is committed)
 make build      # -> bin/agent
+# make vmlinux  # optional: re-dump this kernel's BTF over the committed header (only if adding probes)
 
 sudo ./bin/agent --interval 5s --top 12
 ```

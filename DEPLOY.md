@@ -18,20 +18,23 @@ Two ways to run it: **[Kubernetes](#a-kubernetes)** (the real way) or **[bare bi
 
 - Linux kernel **≥ 5.10** with BTF (`/sys/kernel/btf/vmlinux` exists) and **cgroups v2** (`stat -fc %T /sys/fs/cgroup` → `cgroup2fs`)
 - A CRI runtime — **containerd** at `/run/containerd/containerd.sock` (CRI-O works too; pass `--cri-socket`)
-- To **build**: Go ≥ 1.25, clang/LLVM, libbpf-dev, bpftool, make, and Docker (for the image). See [`README.md`](README.md#build-host-requirements).
+- To **build**: just **Docker** on any OS (`./docker-build.sh`, which carries the whole toolchain in-image) — or, for the native path, Go ≥ 1.25 + clang/LLVM + libbpf-dev + bpftool + make on a Linux host. See [`README.md`](README.md#build-with-docker-any-os--the-easy-path).
 
 ---
 
 ## A. Kubernetes
 
-### 1. Build the binaries and image
+### 1. Build the image
 
-The binaries embed the BPF bytecode and are static, so the image is just a wrapper (no toolchain inside). Build on a Linux host with BTF:
+The whole build (BPF compile + static Go binaries) runs inside Docker, so you can do this on **any OS** — no clang/libbpf/Go needed locally:
 
 ```sh
-./build.sh                              # -> bin/{agent,controller,sentinelctl}
-docker build -t node-sentinel:dev .
+./docker-build.sh image                                          # host arch, loaded into docker
+# or, for a mixed-arch cluster, push a multi-arch manifest to a registry:
+./docker-build.sh image --push -t <registry>/node-sentinel:<tag>
 ```
+
+(Have the toolchain on a Linux host and prefer the native path? `./build.sh` still produces `bin/{agent,controller,sentinelctl}`. The Dockerfile builds from source either way.)
 
 ### 2. Make the image available to the cluster
 

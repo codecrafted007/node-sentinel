@@ -13,9 +13,17 @@ BPFTOOL ?= bpftool
 BIN     ?= bin
 VMLINUX := internal/ebpf/bpf/vmlinux.h
 
-.PHONY: all setup vmlinux generate build agent test clean
+.PHONY: all setup vmlinux generate build agent test clean docker-binaries docker-image
 
 all: build
+
+## docker-binaries: cross-arch static binaries via Docker (any OS) -> bin/<os>_<arch>/
+docker-binaries:
+	./docker-build.sh binaries
+
+## docker-image: build node-sentinel:dev via Docker (any OS), load into local daemon
+docker-image:
+	./docker-build.sh image
 
 ## setup: install Go deps (cilium/ebpf) — run once on the build host
 setup:
