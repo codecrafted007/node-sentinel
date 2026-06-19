@@ -8,9 +8,25 @@ Kubernetes shares node resources (CPU run queues, disk I/O queues, NIC queues) a
 
 ---
 
-## Status — Phase 1 (Foundation) complete
+## Status — detection works; remediation is roadmap
 
-The per-node **agent** works end-to-end: it loads eBPF observers for **CPU scheduling, disk I/O, and network**, resolves cgroups to Kubernetes pods, and — crucially — **stays quiet unless the node is genuinely contended**. A stable cluster logs one line per interval; when a pod is actually starved (of CPU, disk I/O, or network) it prints per-dimension **offenders** (who's over-using the resource) and **victims** (who's suffering), each judged against a learned baseline with a confidence score. The controller (policy decision/remediation) is not built yet — see the roadmap in design §23.
+At a glance — what's real today vs. what the design still promises:
+
+| Capability | State |
+|---|---|
+| Per-node agent: eBPF observers for **CPU, disk I/O, network** | ✅ built |
+| cgroup → Kubernetes pod attribution (via CRI) | ✅ built |
+| Contention **judgement** — quiet unless genuinely contended | ✅ built |
+| Learned per-pod **baselines** + **confidence** scoring (victim *and* offender side) | ✅ built |
+| Observability: Prometheus `/metrics`, `sentinelctl` CLI, <1% CPU overhead (measured) | ✅ built |
+| Cluster **controller**: aggregates per-node reports, cluster view (observe-only) | ✅ built |
+| Controller emits Kubernetes **Events** | 🔜 roadmap |
+| **NodeHealthPolicy** CRD + decision engine | 🔜 roadmap |
+| **Remediation** (taint / cordon / evict) under confidence gates | 🔜 roadmap |
+
+In short: node-sentinel today is a **production-quiet, multi-dimensional contention _detector_** with honest pod attribution. The **_remediation_** half of the design (the controller acting on offenders) is not built yet — see the roadmap in design §23 and the slice plan in [`PROGRESS.md`](PROGRESS.md).
+
+The per-node **agent** works end-to-end: it loads eBPF observers for **CPU scheduling, disk I/O, and network**, resolves cgroups to Kubernetes pods, and — crucially — **stays quiet unless the node is genuinely contended**. A stable cluster logs one line per interval; when a pod is actually starved (of CPU, disk I/O, or network) it prints per-dimension **offenders** (who's over-using the resource) and **victims** (who's suffering), each judged against a learned baseline with a confidence score. A cluster-level **controller** aggregates every node's report into one view — observe-only for now; it does not yet take action.
 
 Stable node — just a heartbeat:
 
@@ -62,8 +78,8 @@ echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.profile && source 
 ## Quick start (on the Linux host)
 
 ```sh
-git clone git@github.com:codecrafted007/node-sentinal.git
-cd node-sentinal
+git clone git@github.com:codecrafted007/node-sentinel.git
+cd node-sentinel
 
 make setup      # one-time: fetch Go deps (cilium/ebpf, cri-api, grpc)
 make vmlinux    # dump this kernel's BTF -> internal/ebpf/bpf/vmlinux.h
@@ -227,3 +243,7 @@ The controller is **observe-only** today: run it anywhere, point agents at it wi
 - **agent exits at load (verifier/BTF error)** — confirm BTF (`ls /sys/kernel/btf/vmlinux`) and kernel ≥ 5.10; the `cgroups…kn.id` read and `tp_btf/sched_switch` arg signature are the usual cross-kernel sore spots.
 - **all pods show as `system(cg:N)`** — CRI socket wrong/unreachable; check `--cri-socket` and that the agent runs as root.
 - **`apt` "no longer has a Release file" / "unmet dependencies"** — transient mirror or a half-finished upgrade; `sudo apt-get -o Acquire::Retries=5 update` then `sudo apt-get --fix-broken install`.
+
+## License
+
+[Apache License 2.0](LICENSE) © 2026 Brajesh Pant.

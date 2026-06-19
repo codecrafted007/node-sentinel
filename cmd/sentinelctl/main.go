@@ -17,7 +17,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/codecrafted007/node-sentinal/internal/report"
+	"github.com/codecrafted007/node-sentinel/internal/report"
 )
 
 const defaultSocket = "/var/run/sentinel/agent.sock"

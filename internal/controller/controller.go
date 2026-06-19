@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/codecrafted007/node-sentinal/internal/report"
+	"github.com/codecrafted007/node-sentinel/internal/report"
 )
 
 // nodeState is the latest snapshot from one node plus when it arrived.

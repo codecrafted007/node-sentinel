@@ -6,7 +6,7 @@ package server
 import (
 	"sync"
 
-	"github.com/codecrafted007/node-sentinal/internal/report"
+	"github.com/codecrafted007/node-sentinel/internal/report"
 )
 
 // Store holds the latest snapshot, written by the agent each interval and read

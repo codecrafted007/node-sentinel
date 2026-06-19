@@ -43,7 +43,7 @@ Goal: prove kernel→Go run-queue-latency attribution with a standalone agent (d
 - Ran on the host's single-node cluster (K8s v1.35.0, containerd, systemd cgroup driver): **73 containers mapped**, agent printed real pod names (`default/nascontroller-…`, `kube-system/kube-proxy-…`) instead of raw inode numbers.
 
 ### Repository setup & documentation
-- Module path set to `github.com/codecrafted007/node-sentinal`; git remote `origin` → `git@github.com:codecrafted007/node-sentinal.git`.
+- Module path set to `github.com/codecrafted007/node-sentinel`; git remote `origin` → `git@github.com:codecrafted007/node-sentinel.git`.
 - Added `CLAUDE.md` (guidance for future Claude Code sessions), a dev-friendly `README.md` (build host requirements, quick start, remote-dev loop, troubleshooting), and this `PROGRESS.md`.
 - Added `build.sh` — one-shot build (preflight checks → BTF dump → bpf2go → build every `cmd/`), with `--setup/--tidy/--skip-generate` and a non-Linux guard.
 - Added `HOW.md` — junior-dev onboarding explainer: how the eBPF probe is compiled, embedded (bpf2go + `go:embed`), loaded (`LoadAndAssign`/verifier), and attached, with a tour of the generated `sched_bpfel.go`.

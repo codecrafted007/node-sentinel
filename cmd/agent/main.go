@@ -14,7 +14,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/codecrafted007/node-sentinal/internal/agent"
+	"github.com/codecrafted007/node-sentinel/internal/agent"
 )
 
 func main() {

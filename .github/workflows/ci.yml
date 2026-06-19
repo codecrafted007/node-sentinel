@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The eBPF-facing packages are //go:build linux and need a kernel with BTF +
+# clang/libbpf to compile (see CLAUDE.md). CI only exercises the portable,
+# OS-independent code: the histogram/baseline math and their unit tests.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: go vet (portable packages)
+        run: go vet ./internal/metrics/... ./internal/report/... ./internal/server/... ./internal/controller/...
+
+      - name: go test (portable packages)
+        run: go test -race -count=1 ./internal/metrics/...

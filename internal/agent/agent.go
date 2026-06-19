@@ -11,11 +11,11 @@ import (
 	"sort"
 	"time"
 
-	"github.com/codecrafted007/node-sentinal/internal/cgroup"
-	"github.com/codecrafted007/node-sentinal/internal/ebpf"
-	"github.com/codecrafted007/node-sentinal/internal/metrics"
-	"github.com/codecrafted007/node-sentinal/internal/report"
-	"github.com/codecrafted007/node-sentinal/internal/server"
+	"github.com/codecrafted007/node-sentinel/internal/cgroup"
+	"github.com/codecrafted007/node-sentinel/internal/ebpf"
+	"github.com/codecrafted007/node-sentinel/internal/metrics"
+	"github.com/codecrafted007/node-sentinel/internal/report"
+	"github.com/codecrafted007/node-sentinel/internal/server"
 )
 
 // Agent owns the node-agent lifecycle: load the observers, resolve cgroups to

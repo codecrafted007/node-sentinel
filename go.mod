@@ -1,4 +1,4 @@
-module github.com/codecrafted007/node-sentinal
+module github.com/codecrafted007/node-sentinel
 
 go 1.25
 

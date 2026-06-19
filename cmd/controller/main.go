@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/codecrafted007/node-sentinal/internal/controller"
+	"github.com/codecrafted007/node-sentinel/internal/controller"
 )
 
 func main() {
