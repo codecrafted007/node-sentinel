@@ -18,7 +18,7 @@ Two ways to run it: **[Kubernetes](#a-kubernetes)** (the real way) or **[bare bi
 
 - Linux kernel **≥ 5.10** with BTF (`/sys/kernel/btf/vmlinux` exists) and **cgroups v2** (`stat -fc %T /sys/fs/cgroup` → `cgroup2fs`)
 - A CRI runtime — **containerd** at `/run/containerd/containerd.sock` (CRI-O works too; pass `--cri-socket`)
-- To **build**: just **Docker** on any OS (`./docker-build.sh`, which carries the whole toolchain in-image) — or, for the native path, Go ≥ 1.25 + clang/LLVM + libbpf-dev + bpftool + make on a Linux host. See [`README.md`](README.md#build-with-docker-any-os--the-easy-path).
+- To **build**: just **Docker** on any OS (`./scripts/docker-build.sh`, which carries the whole toolchain in-image) — or, for the native path, Go ≥ 1.25 + clang/LLVM + libbpf-dev + bpftool + make on a Linux host. See [`README.md`](../README.md#build-with-docker-any-os--the-easy-path).
 
 ---
 
@@ -29,12 +29,12 @@ Two ways to run it: **[Kubernetes](#a-kubernetes)** (the real way) or **[bare bi
 The whole build (BPF compile + static Go binaries) runs inside Docker, so you can do this on **any OS** — no clang/libbpf/Go needed locally:
 
 ```sh
-./docker-build.sh image                                          # host arch, loaded into docker
+./scripts/docker-build.sh image                                          # host arch, loaded into docker
 # or, for a mixed-arch cluster, push a multi-arch manifest to a registry:
-./docker-build.sh image --push -t <registry>/node-sentinel:<tag>
+./scripts/docker-build.sh image --push -t <registry>/node-sentinel:<tag>
 ```
 
-(Have the toolchain on a Linux host and prefer the native path? `./build.sh` still produces `bin/{agent,controller,sentinelctl}`. The Dockerfile builds from source either way.)
+(Have the toolchain on a Linux host and prefer the native path? `./scripts/build.sh` still produces `bin/{agent,controller,sentinelctl}`. The Dockerfile builds from source either way.)
 
 ### 2. Make the image available to the cluster
 
@@ -87,7 +87,7 @@ No Kubernetes needed — good for bare-metal/VM nodes, and this is exactly how t
 ### Controller (run once, on any reachable host)
 
 ```sh
-./build.sh
+./scripts/build.sh
 sudo ./bin/controller --listen :19090 --log-interval 5s
 # POST /report, GET /status, GET /healthz
 ```
@@ -118,13 +118,13 @@ curl -s http://<controller-host>:19090/status   # cluster view
 curl -s localhost:2112/metrics | grep sentinel_ # agent metrics
 ```
 
-Validate detection end-to-end with [`./stress-test.sh`](README.md#stress-testing--validation) and overhead with `./overhead.sh`.
+Validate detection end-to-end with [`./scripts/stress-test.sh`](../README.md#stress-testing--validation) and overhead with `./scripts/overhead.sh`.
 
 ---
 
 ## Tuning
 
-Detection thresholds are agent flags (see [`README.md`](README.md#run-on-a-linux-host-kernel--510-with-btf--cgroups-v2)): `--runq-warn`, `--io-warn`, `--retrans-warn`, `--min-samples`, `--deviation`, `--confidence`. Defaults are conservative; latency-sensitive nodes warrant lower thresholds. (A `NodeHealthPolicy` CRD will make these cluster-policy-driven in a later slice.)
+Detection thresholds are agent flags (see [`README.md`](../README.md#run-on-a-linux-host-kernel--510-with-btf--cgroups-v2)): `--runq-warn`, `--io-warn`, `--retrans-warn`, `--min-samples`, `--deviation`, `--confidence`. Defaults are conservative; latency-sensitive nodes warrant lower thresholds. (A `NodeHealthPolicy` CRD will make these cluster-policy-driven in a later slice.)
 
 ## Troubleshooting
 

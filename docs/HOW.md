@@ -281,7 +281,7 @@ The thing you were missing: **your C struct/funcs/maps → bpf2go names them in 
 **If you change the C file (`sched_monitor.bpf.c`), you must regenerate before building** — otherwise the embedded bytecode is stale:
 
 ```sh
-./build.sh        # does generate + build for you (the safe default)
+./scripts/build.sh        # does generate + build for you (the safe default)
 # or manually:
 make generate     # re-runs bpf2go (recompiles C, regenerates the Go file)
 make build        # rebuilds bin/agent with the new bytecode baked in

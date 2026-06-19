@@ -7,17 +7,17 @@
 # binaries are cross-compiled per arch, so this is fast and needs no emulation.
 #
 # Usage:
-#   ./docker-build.sh binaries                 # cross-arch binaries -> ./bin/<os>_<arch>/
-#   ./docker-build.sh image                    # image for the HOST arch, loaded into docker
-#   ./docker-build.sh image --push -t R/N:T     # multi-arch manifest pushed to a registry
-#   ./docker-build.sh vmlinux                   # regenerate the committed CO-RE header
+#   ./scripts/docker-build.sh binaries                 # cross-arch binaries -> ./bin/<os>_<arch>/
+#   ./scripts/docker-build.sh image                    # image for the HOST arch, loaded into docker
+#   ./scripts/docker-build.sh image --push -t R/N:T     # multi-arch manifest pushed to a registry
+#   ./scripts/docker-build.sh vmlinux                   # regenerate the committed CO-RE header
 #
 # Env overrides:
 #   PLATFORMS  target platforms (default: linux/amd64,linux/arm64)
 #   IMAGE      image tag for `image`           (default: node-sentinel:dev)
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"

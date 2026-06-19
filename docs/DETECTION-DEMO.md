@@ -2,7 +2,7 @@
 
 A reproducible walkthrough of node-sentinel detecting a CPU noisy-neighbour on a **live multi-node Kubernetes cluster**, with the actual output it produced. It shows the part that makes the system trustworthy: it **refuses to blame a pod until it's confident**, and it tells a *spike* apart from a pod that's *simply always busy*.
 
-> Node and third-party workload names below are anonymized (`worker-1`, `app-*`); the agent's own output format and numbers are verbatim from a real run. The model: [`CONCEPTS.md`](CONCEPTS.md) · the confidence code: [`internal/agent/agent.go`](internal/agent/agent.go) (`offenderConfidence`).
+> Node and third-party workload names below are anonymized (`worker-1`, `app-*`); the agent's own output format and numbers are verbatim from a real run. The model: [`CONCEPTS.md`](CONCEPTS.md) · the confidence code: [`internal/agent/agent.go`](../internal/agent/agent.go) (`offenderConfidence`).
 
 ---
 

@@ -14,12 +14,12 @@
 # gate CI. The agent output for each phase is shown so you can read the numbers.
 #
 # Usage:
-#   sudo ./stress-test.sh [--workers N] [--duration S] [--interval D] [--top N]
+#   sudo ./scripts/stress-test.sh [--workers N] [--duration S] [--interval D] [--top N]
 #
 # Defaults: workers = 4 x nproc, duration 30 (s), interval 5s, top 10.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 AGENT="$ROOT/bin/agent"
@@ -46,7 +46,7 @@ err()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; }
 # --- preflight ---
 [ "$(uname -s)" = "Linux" ] || { err "Linux host only (eBPF)."; exit 1; }
 [ "$(id -u)" = "0" ]        || { err "run as root (sudo) — the agent needs BPF capabilities."; exit 1; }
-[ -x "$AGENT" ]            || { err "missing $AGENT — run ./build.sh first."; exit 1; }
+[ -x "$AGENT" ]            || { err "missing $AGENT — run 'make build' first."; exit 1; }
 command -v stress-ng >/dev/null 2>&1 || { err "stress-ng not found — install it: sudo apt-get install -y stress-ng"; exit 1; }
 command -v systemd-run >/dev/null 2>&1 || { err "systemd-run not found (needs systemd)."; exit 1; }
 

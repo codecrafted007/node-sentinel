@@ -10,14 +10,14 @@ A practical, copy-pasteable reference for every command in this repo: build, run
 
 ### The easy path — Docker (mac / win / linux, no toolchain)
 
-The whole eBPF + Go build runs inside Docker. See [`docker-build.sh`](docker-build.sh).
+The whole eBPF + Go build runs inside Docker. See [`docker-build.sh`](../scripts/docker-build.sh).
 
 | Command | Result |
 |---|---|
-| `./docker-build.sh binaries` | cross-arch static binaries → `bin/linux_amd64/{agent,controller,sentinelctl}` + `bin/linux_arm64/...` |
-| `./docker-build.sh image` | `node-sentinel:dev` for the **host arch**, loaded into the local docker |
-| `./docker-build.sh image --push -t <registry>/node-sentinel:<tag>` | multi-arch (amd64+arm64) manifest pushed to a registry |
-| `./docker-build.sh vmlinux` | regenerate the committed CO-RE header `internal/ebpf/bpf/vmlinux.h` |
+| `./scripts/docker-build.sh binaries` | cross-arch static binaries → `bin/linux_amd64/{agent,controller,sentinelctl}` + `bin/linux_arm64/...` |
+| `./scripts/docker-build.sh image` | `node-sentinel:dev` for the **host arch**, loaded into the local docker |
+| `./scripts/docker-build.sh image --push -t <registry>/node-sentinel:<tag>` | multi-arch (amd64+arm64) manifest pushed to a registry |
+| `./scripts/docker-build.sh vmlinux` | regenerate the committed CO-RE header `internal/ebpf/bpf/vmlinux.h` |
 
 Build a single explicit arch (e.g. amd64 image from an arm64 mac) directly:
 
@@ -36,9 +36,9 @@ make setup       # one-time: go get cilium/ebpf + go mod tidy
 make generate    # compile BPF C + bpf2go bindings (needs clang; vmlinux.h is committed)
 make build       # -> bin/agent
 make test        # portable unit tests (work on any OS, incl. macOS)
-./build.sh        # all three binaries -> bin/{agent,controller,sentinelctl}
-#   ./build.sh --setup        also fetch Go deps first
-#   ./build.sh --skip-generate  reuse existing bindings (skip BTF dump + bpf2go)
+./scripts/build.sh        # all three binaries -> bin/{agent,controller,sentinelctl}
+#   ./scripts/build.sh --setup        also fetch Go deps first
+#   ./scripts/build.sh --skip-generate  reuse existing bindings (skip BTF dump + bpf2go)
 make vmlinux     # re-dump this kernel's BTF -> vmlinux.h (only when adding probes that read new structs)
 make clean       # remove bin/ + generated bpf2go files
 ```
@@ -173,10 +173,10 @@ The image imports as `docker.io/library/node-sentinel:dev`; a bare `node-sentine
 ## 7. Validate detection & overhead (bare-metal / VM)
 
 ```sh
-sudo ./stress-test.sh                                   # run a CPU hog, watch the agent catch it
-sudo ./stress-test.sh --workers 8 --duration 60 --interval 5s --top 10
-sudo ./overhead.sh                                      # measure agent CPU overhead (<1% target)
-sudo ./overhead.sh --window 60 --stress-workers 4
+sudo ./scripts/stress-test.sh                                   # run a CPU hog, watch the agent catch it
+sudo ./scripts/stress-test.sh --workers 8 --duration 60 --interval 5s --top 10
+sudo ./scripts/overhead.sh                                      # measure agent CPU overhead (<1% target)
+sudo ./scripts/overhead.sh --window 60 --stress-workers 4
 ```
 
 `stress-test.sh` needs `stress-ng`; `overhead.sh` runs the agent under `systemd-run` and samples its CPU. Both are Linux-host tools.
@@ -207,6 +207,6 @@ Pods are annotated `prometheus.io/scrape: "true"`, `prometheus.io/port: "2112"`.
 | `make build` | build `bin/agent` |
 | `make agent` | build + `sudo` run the agent |
 | `make test` | portable unit tests (any OS) |
-| `make docker-binaries` | `./docker-build.sh binaries` |
-| `make docker-image` | `./docker-build.sh image` |
+| `make docker-binaries` | `./scripts/docker-build.sh binaries` |
+| `make docker-image` | `./scripts/docker-build.sh image` |
 | `make clean` | remove `bin/` + generated bindings |

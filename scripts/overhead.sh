@@ -6,12 +6,12 @@
 #   * BPF handlers          ~100-200 ns per event
 #
 # Measures idle and under stress (overhead scales with context-switch rate, not
-# cluster size). Run on the Linux host, as root, after ./build.sh.
+# cluster size). Run on the Linux host, as root, after ./scripts/build.sh.
 #
-# Usage: sudo ./overhead.sh [--window S] [--stress-workers N]
+# Usage: sudo ./scripts/overhead.sh [--window S] [--stress-workers N]
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 AGENT="$ROOT/bin/agent"
@@ -35,7 +35,7 @@ log() { printf '\n\033[1;34m== %s ==\033[0m\n' "$*"; }
 
 [ "$(uname -s)" = "Linux" ] || { err "Linux host only."; exit 1; }
 [ "$(id -u)" = "0" ]       || { err "run as root (sudo)."; exit 1; }
-[ -x "$AGENT" ]           || { err "missing $AGENT — run ./build.sh first."; exit 1; }
+[ -x "$AGENT" ]           || { err "missing $AGENT — run 'make build' first."; exit 1; }
 
 cleanup() {
   systemctl stop "$UNIT_AGENT" "$UNIT_STRESS" 2>/dev/null || true

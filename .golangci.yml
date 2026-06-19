@@ -1,0 +1,31 @@
+# golangci-lint configuration.
+#
+# Note: the eBPF packages are //go:build linux and need clang-generated bpf2go
+# bindings present to compile, so lint them on a Linux build host after
+# `make generate`. The portable packages lint anywhere:
+#   golangci-lint run ./internal/metrics/... ./internal/report/... \
+#                      ./internal/server/... ./internal/controller/...
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - gofmt
+    - goimports
+    - revive
+    - unconvert
+    - bodyclose
+
+issues:
+  exclude-rules:
+    # generated bpf2go bindings
+    - path: _bpf(el|eb)\.go
+      linters: [all]
+  max-issues-per-linter: 0
+  max-same-issues: 0

@@ -1,6 +1,6 @@
 # Architecture — node-sentinel at a glance
 
-How the pieces fit, in three pictures: **where it runs**, **how data flows**, and **how one agent turns kernel events into a verdict**. Plain-English model is in [`CONCEPTS.md`](CONCEPTS.md); the eBPF build/run mechanics are in [`HOW.md`](HOW.md); the formal design is in [`docs/`](docs/).
+How the pieces fit, in three pictures: **where it runs**, **how data flows**, and **how one agent turns kernel events into a verdict**. Plain-English model is in [`CONCEPTS.md`](CONCEPTS.md); the eBPF build/run mechanics are in [`HOW.md`](HOW.md); the formal design is in [`docs/`](.).
 
 Each box is tagged ✅ **built** or 🔜 **roadmap** so you can tell today's behaviour from where it's heading.
 
@@ -124,4 +124,4 @@ flowchart TB
 | Controller (aggregate) | `internal/controller/*` + `cmd/controller/main.go` |
 | Live CLI | `cmd/sentinelctl` |
 
-Layout follows design §7.2.1. For the numbers behind each stage (event rates, map sizes, overhead), see [`docs/node-sentinel-internals.md`](docs/node-sentinel-internals.md).
+Layout follows design §7.2.1. For the numbers behind each stage (event rates, map sizes, overhead), see [`docs/node-sentinel-internals.md`](node-sentinel-internals.md).

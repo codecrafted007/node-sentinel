@@ -13,17 +13,17 @@ BPFTOOL ?= bpftool
 BIN     ?= bin
 VMLINUX := internal/ebpf/bpf/vmlinux.h
 
-.PHONY: all setup vmlinux generate build agent test clean docker-binaries docker-image
+.PHONY: all setup vmlinux generate build agent test clean docker-binaries docker-image stress overhead
 
 all: build
 
 ## docker-binaries: cross-arch static binaries via Docker (any OS) -> bin/<os>_<arch>/
 docker-binaries:
-	./docker-build.sh binaries
+	./scripts/docker-build.sh binaries
 
 ## docker-image: build node-sentinel:dev via Docker (any OS), load into local daemon
 docker-image:
-	./docker-build.sh image
+	./scripts/docker-build.sh image
 
 ## setup: install Go deps (cilium/ebpf) — run once on the build host
 setup:
@@ -49,6 +49,14 @@ agent: build
 ## test: run portable unit tests (any OS)
 test:
 	$(GO) test ./internal/metrics/...
+
+## stress: acceptance test — assert quiet-when-healthy, loud-under-contention (Linux, root)
+stress: build
+	sudo ./scripts/stress-test.sh
+
+## overhead: measure agent CPU/RSS against the design §16 budget (Linux, root)
+overhead: build
+	sudo ./scripts/overhead.sh
 
 ## clean: remove build artifacts + generated bindings
 clean:

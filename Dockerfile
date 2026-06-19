@@ -2,11 +2,11 @@
 #
 # Builds the eBPF bytecode and the static Go binaries entirely inside Docker, so
 # a dev on macOS / Windows / Linux needs only Docker — no clang, libbpf, bpftool,
-# or Go toolchain installed locally. Use ./docker-build.sh as the front door:
+# or Go toolchain installed locally. Use ./scripts/docker-build.sh as the front door:
 #
-#   ./docker-build.sh binaries     # -> bin/linux_amd64/{agent,controller,sentinelctl} + linux_arm64/...
-#   ./docker-build.sh image        # -> node-sentinel:dev loaded into the local daemon (host arch)
-#   ./docker-build.sh image --push -t <registry>/node-sentinel:<tag>   # multi-arch manifest
+#   ./scripts/docker-build.sh binaries     # -> bin/linux_amd64/{agent,controller,sentinelctl} + linux_arm64/...
+#   ./scripts/docker-build.sh image        # -> node-sentinel:dev loaded into the local daemon (host arch)
+#   ./scripts/docker-build.sh image --push -t <registry>/node-sentinel:<tag>   # multi-arch manifest
 #
 # Why this is fast and arch-clean:
 #   - The BPF object is compiled ONCE. Our probes use tp_btf/fentry only (no

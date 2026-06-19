@@ -4,7 +4,7 @@
 
 Kubernetes shares node resources (CPU run queues, disk I/O queues, NIC queues) across pods, but the scheduler can't see contention at those boundaries. When one pod saturates a shared resource, its neighbors degrade silently. node-sentinel observes the contention *inside the kernel* with eBPF, attributes it to specific pods, and (in later phases) remediates under operator-defined policy.
 
-**New here?** Start with [`CONCEPTS.md`](CONCEPTS.md) (what it does & how it decides, in plain English), then [`ARCHITECTURE.md`](ARCHITECTURE.md) (three diagrams: where it runs, how data flows, inside one agent) and [`HOW.md`](HOW.md) (how the eBPF probe is built, embedded, and run). **Want to run it?** → [`DEPLOY.md`](DEPLOY.md) (Kubernetes manifests + bare-binary/systemd, step by step) · every command in one place: [`HELPERCOMMANDS.md`](HELPERCOMMANDS.md) · see it catch a noisy neighbour on a live cluster: [`DETECTION-DEMO.md`](DETECTION-DEMO.md). Full design: [`docs/node-sentinel-design-v0.3.md`](docs/node-sentinel-design-v0.3.md) · dataflow & scale: [`docs/node-sentinel-internals.md`](docs/node-sentinel-internals.md) · progress log: [`PROGRESS.md`](PROGRESS.md).
+**New here?** Start with [`CONCEPTS.md`](docs/CONCEPTS.md) (what it does & how it decides, in plain English), then [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) (three diagrams: where it runs, how data flows, inside one agent) and [`HOW.md`](docs/HOW.md) (how the eBPF probe is built, embedded, and run). **Want to run it?** → [`DEPLOY.md`](docs/DEPLOY.md) (Kubernetes manifests + bare-binary/systemd, step by step) · every command in one place: [`HELPERCOMMANDS.md`](docs/HELPERCOMMANDS.md) · see it catch a noisy neighbour on a live cluster: [`DETECTION-DEMO.md`](docs/DETECTION-DEMO.md). Full design: [`docs/node-sentinel-design-v0.3.md`](docs/node-sentinel-design-v0.3.md) · dataflow & scale: [`docs/node-sentinel-internals.md`](docs/node-sentinel-internals.md) · progress log: [`PROGRESS.md`](docs/PROGRESS.md).
 
 ---
 
@@ -24,7 +24,7 @@ At a glance — what's real today vs. what the design still promises:
 | **NodeHealthPolicy** CRD + decision engine | 🔜 roadmap |
 | **Remediation** (taint / cordon / evict) under confidence gates | 🔜 roadmap |
 
-In short: node-sentinel today is a **production-quiet, multi-dimensional contention _detector_** with honest pod attribution. The **_remediation_** half of the design (the controller acting on offenders) is not built yet — see the roadmap in design §23 and the slice plan in [`PROGRESS.md`](PROGRESS.md).
+In short: node-sentinel today is a **production-quiet, multi-dimensional contention _detector_** with honest pod attribution. The **_remediation_** half of the design (the controller acting on offenders) is not built yet — see the roadmap in design §23 and the slice plan in [`PROGRESS.md`](docs/PROGRESS.md).
 
 The per-node **agent** works end-to-end: it loads eBPF observers for **CPU scheduling, disk I/O, and network**, resolves cgroups to Kubernetes pods, and — crucially — **stays quiet unless the node is genuinely contended**. A stable cluster logs one line per interval; when a pod is actually starved (of CPU, disk I/O, or network) it prints per-dimension **offenders** (who's over-using the resource) and **victims** (who's suffering), each judged against a learned baseline with a confidence score. A cluster-level **controller** aggregates every node's report into one view — observe-only for now; it does not yet take action.
 
@@ -49,7 +49,7 @@ Under real contention (a CPU hog running, baseline warmed up):
   kube-system/calico-…/controllers          24        24576     26.6x        226
 ```
 
-> Two signals from one tracepoint: **CPU intensity** (offender — share of CPU consumed, judged against the pod's request) and **run-queue latency** (victim — how long it waited). On top of those: each victim's **xBASELINE** shows how far it's degraded from its *own* learned normal, and each offender gets a **confidence** score. The `attribution` line is the honest verdict — here it refuses to blame a pod because the real hog is a system process. See [`CONCEPTS.md`](CONCEPTS.md) for the plain-English model. Still to come: *acting* on high-confidence offenders (the controller).
+> Two signals from one tracepoint: **CPU intensity** (offender — share of CPU consumed, judged against the pod's request) and **run-queue latency** (victim — how long it waited). On top of those: each victim's **xBASELINE** shows how far it's degraded from its *own* learned normal, and each offender gets a **confidence** score. The `attribution` line is the honest verdict — here it refuses to blame a pod because the real hog is a system process. See [`CONCEPTS.md`](docs/CONCEPTS.md) for the plain-English model. Still to come: *acting* on high-confidence offenders (the controller).
 
 ---
 
@@ -61,14 +61,14 @@ You don't need the eBPF toolchain (clang/libbpf/bpftool/Go) on your machine — 
 git clone git@github.com:codecrafted007/node-sentinel.git
 cd node-sentinel
 
-./docker-build.sh binaries     # cross-arch static binaries -> bin/linux_amd64/... + bin/linux_arm64/...
-./docker-build.sh image        # node-sentinel:dev for your host arch, loaded into docker
-./docker-build.sh image --push -t <registry>/node-sentinel:<tag>   # multi-arch (amd64+arm64) manifest
+./scripts/docker-build.sh binaries     # cross-arch static binaries -> bin/linux_amd64/... + bin/linux_arm64/...
+./scripts/docker-build.sh image        # node-sentinel:dev for your host arch, loaded into docker
+./scripts/docker-build.sh image --push -t <registry>/node-sentinel:<tag>   # multi-arch (amd64+arm64) manifest
 ```
 
 It's fast: the BPF object is compiled **once** (our probes are `tp_btf`/`fentry`-only, so the bytecode is CPU-arch-independent), and the `CGO_ENABLED=0` Go binaries cross-compile per arch with no QEMU emulation. The CO-RE header `internal/ebpf/bpf/vmlinux.h` is committed, so the build is fully offline/hermetic — one header relocates against any running kernel ≥ 5.10 at load time. (The agent still only *runs* on Linux; see below.)
 
-Then copy the right binary onto a Linux node and run it, or deploy the image — see [`DEPLOY.md`](DEPLOY.md).
+Then copy the right binary onto a Linux node and run it, or deploy the image — see [`DEPLOY.md`](docs/DEPLOY.md).
 
 ## Why you still need a Linux box (to *run* it)
 
@@ -190,8 +190,8 @@ ssh <user>@<host> 'export PATH=$PATH:/usr/local/go/bin && cd ~/node-sentinel && 
 
 ```sh
 sudo apt-get install -y stress-ng        # one-time prerequisite
-./build.sh                               # ensure bin/agent exists
-sudo ./stress-test.sh                     # runs the test, prints PASS/FAIL
+./scripts/build.sh                               # ensure bin/agent exists
+sudo ./scripts/stress-test.sh                     # runs the test, prints PASS/FAIL
 # options: --workers N (default 4×nproc)  --duration S  --interval 5s  --top 10
 ```
 
@@ -222,7 +222,7 @@ sudo systemctl stop ns-stress               # watch them recover
 
 ### Overhead
 
-`sudo ./overhead.sh` measures the agent against the budget (design §16): userspace CPU and RSS (idle and under stress) plus per-event BPF handler cost. On a 12-core node it measured **~0.1% of node CPU and ~42 MB RSS** — well within the < 1% CPU / < 50 MB budget. (The BPF handlers run ~400–700 ns/event because `sched_switch` does both CPU-time and run-queue-latency accounting.)
+`sudo ./scripts/overhead.sh` measures the agent against the budget (design §16): userspace CPU and RSS (idle and under stress) plus per-event BPF handler cost. On a 12-core node it measured **~0.1% of node CPU and ~42 MB RSS** — well within the < 1% CPU / < 50 MB budget. (The BPF handlers run ~400–700 ns/event because `sched_switch` does both CPU-time and run-queue-latency accounting.)
 
 ---
 
@@ -239,7 +239,9 @@ internal/metrics/     histogram.go + baseline.go (learned normals)  — portable
 internal/report/      shared snapshot type (portable)
 internal/server/      Prometheus /metrics + sentinelctl unix socket (portable)
 internal/controller/  cluster aggregator (portable)  [Phase 3]
-docs/                 design + internals
+deploy/               Kubernetes manifests (namespace, rbac, agent, controller)
+scripts/              build.sh, docker-build.sh, stress-test.sh, overhead.sh
+docs/                 design, internals, concepts, architecture, how, deploy, commands, demo
 ```
 
 The controller is **observe-only** today: run it anywhere, point agents at it with `--controller-addr http://<host>:<port>`, and it prints a cluster-wide contention summary. Kubernetes Events, a `NodeHealthPolicy` CRD, and remediation are the next slices.
@@ -254,6 +256,10 @@ The controller is **observe-only** today: run it anywhere, point agents at it wi
 | `make build` | build `bin/agent` |
 | `make agent` | build + run with sudo |
 | `make test` | portable unit tests (any OS) |
+| `make stress` | acceptance test — quiet-when-healthy, loud-under-contention (Linux, root) |
+| `make overhead` | measure agent CPU/RSS vs. the design §16 budget (Linux, root) |
+| `make docker-binaries` | cross-arch static binaries via Docker (any OS) |
+| `make docker-image` | build the image via Docker (any OS) |
 | `make clean` | remove `bin/` and generated bindings |
 
 ## Troubleshooting

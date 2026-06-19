@@ -1,6 +1,6 @@
 # Concepts — node-sentinel in plain English
 
-This explains *what* node-sentinel is trying to do and *how it decides*, with no jargon. For how the eBPF machinery actually works, see [`HOW.md`](HOW.md). For the formal design, see [`docs/`](docs/).
+This explains *what* node-sentinel is trying to do and *how it decides*, with no jargon. For how the eBPF machinery actually works, see [`HOW.md`](HOW.md). For the formal design, see [`docs/`](.).
 
 Each idea below is tagged ✅ **built** or 🔜 **planned**, so you can tell today's behaviour from where we're heading.
 

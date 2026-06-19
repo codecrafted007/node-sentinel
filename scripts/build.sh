@@ -7,16 +7,16 @@
 # cgroups v2) and the toolchain: Go >= 1.25, clang/LLVM, bpftool, libbpf headers.
 #
 # Usage:
-#   ./build.sh                  # BTF dump + generate bindings + build all cmds
-#   ./build.sh --setup          # also fetch Go deps first (go get + tidy)
-#   ./build.sh --tidy           # run `go mod tidy` before building
-#   ./build.sh --skip-generate  # reuse existing bindings (skip BTF dump + bpf2go)
-#   ./build.sh -h | --help
+#   ./scripts/build.sh                  # BTF dump + generate bindings + build all cmds
+#   ./scripts/build.sh --setup          # also fetch Go deps first (go get + tidy)
+#   ./scripts/build.sh --tidy           # run `go mod tidy` before building
+#   ./scripts/build.sh --skip-generate  # reuse existing bindings (skip BTF dump + bpf2go)
+#   ./scripts/build.sh -h | --help
 #
 # Env overrides: GO, CLANG, BPFTOOL, OUTDIR
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 # Use the local Go toolchain only — fail loudly rather than silently downloading
