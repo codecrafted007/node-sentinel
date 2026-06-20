@@ -65,10 +65,10 @@ flowchart LR
     A -->|"per-node report"| C
     C -->|"action 🔜"| E
 
-    style K fill:#e8f4ea,stroke:#3a7d44
-    style A fill:#e8f4ea,stroke:#3a7d44
-    style C fill:#fff6e5,stroke:#b8860b
-    style E fill:#fdeaea,stroke:#b03a3a
+    style K fill:#cdebd3,stroke:#2f6b38,color:#10240f
+    style A fill:#cdebd3,stroke:#2f6b38,color:#10240f
+    style C fill:#ffe7bf,stroke:#9c7209,color:#3a2a00
+    style E fill:#f8d4d4,stroke:#962f2f,color:#330d0d
 ```
 
 Green = built and running today. Amber = partially built (the controller aggregates but doesn't yet decide). Red = roadmap.
