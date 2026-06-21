@@ -6,6 +6,7 @@ Start here, then follow the path that fits what you need.
 - [`CONCEPTS.md`](CONCEPTS.md) — what node-sentinel does and how it decides, in plain English (offender/victim, baselines, confidence). Tagged ✅ built / 🔜 planned.
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — three diagrams: where it runs, how data flows, inside one agent.
 - [`HOW.md`](HOW.md) — how the eBPF probe is compiled, embedded (bpf2go + `go:embed`), loaded, and attached.
+- [`sim/temporal-correlation.html`](sim/temporal-correlation.html) — two interactive toys (open in any browser, no build): why a coarse scrape hides short bursts, and how shape-not-magnitude correlation pins the offender. Models the 🔜 sub-interval correlation feature.
 
 ## Run it
 - [`DEPLOY.md`](DEPLOY.md) — Kubernetes manifests and bare-binary/systemd, step by step.

@@ -125,3 +125,5 @@ flowchart TB
 | Live CLI | `cmd/sentinelctl` |
 
 Layout follows design §7.2.1. For the numbers behind each stage (event rates, map sizes, overhead), see [`docs/node-sentinel-internals.md`](node-sentinel-internals.md).
+
+> **Play with the detection idea:** [`sim/temporal-correlation.html`](sim/temporal-correlation.html) is a no-build, open-in-a-browser pair of toys — one shows why a coarse scrape interval hides a short burst, the other shows how node-sentinel will pin the offender by the *shape* of its bursts (not their size). It's a sketch of the 🔜 sub-interval correlation work, not the running agent.

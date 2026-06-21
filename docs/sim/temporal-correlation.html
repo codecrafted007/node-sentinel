@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>node-sentinel — Temporal Correlation Simulators</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #1a212b; --line: #2a3441; --ink: #e6edf3;
+    --muted: #93a1b0; --green: #4cc38a; --amber: #d6a32a; --red: #d6584f;
+    --blue: #58a6ff; --accent: #7ee2b8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header { padding: 28px 24px 8px; max-width: 980px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  h2 { font-size: 17px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 6px; }
+  main { max-width: 980px; margin: 0 auto; padding: 0 24px 60px; }
+  .tabs { display: flex; gap: 8px; margin: 18px 0 20px; border-bottom: 1px solid var(--line); }
+  .tab {
+    background: none; border: 0; color: var(--muted); padding: 10px 14px;
+    font-size: 15px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .tab.active { color: var(--ink); border-bottom-color: var(--accent); }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
+  .grid { display: grid; grid-template-columns: 260px 1fr; gap: 22px; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+  .ctrl { margin-bottom: 14px; }
+  .ctrl label { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  .ctrl label b { color: var(--ink); font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  canvas { width: 100%; background: #0c1117; border: 1px solid var(--line); border-radius: 8px; display: block; }
+  .readout { margin-top: 14px; display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+  .stat { background: #0c1117; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .stat .k { font-size: 12px; color: var(--muted); }
+  .stat .v { font-size: 20px; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .verdict { margin-top: 14px; padding: 12px 14px; border-radius: 8px; font-size: 14px; border: 1px solid var(--line); }
+  .verdict.good { background: rgba(76,195,138,.10); border-color: var(--green); }
+  .verdict.warn { background: rgba(214,163,42,.10); border-color: var(--amber); }
+  .verdict.bad  { background: rgba(214,88,79,.10); border-color: var(--red); }
+  .verdict.idle { background: #0c1117; color: var(--muted); }
+  .note { color: var(--muted); font-size: 13px; margin-top: 16px; }
+  .legend { display: flex; gap: 16px; font-size: 13px; color: var(--muted); margin: 8px 0 0; }
+  .legend i { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+  code { background: #0c1117; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  .hidden { display: none; }
+  a { color: var(--blue); }
+</style>
+</head>
+<body>
+<header>
+  <h1>node-sentinel · Temporal Correlation Simulators</h1>
+  <p class="sub">Why a 5-second average hides the noisy neighbour — and how sub-interval bucketing plus a lagged
+  correlation catches it. Two toys for one idea. 🔜 models a planned feature; the kernel-side bucketing isn't built yet.</p>
+</header>
+
+<main>
+  <div class="tabs">
+    <button class="tab active" data-tab="t1">1 · Why sub-intervals</button>
+    <button class="tab" data-tab="t2">2 · Offender ↔ victim correlation</button>
+  </div>
+
+  <!-- ================= SIM 1 ================= -->
+  <section id="t1" class="panel">
+    <h2>The averaging trap</h2>
+    <p class="sub">A short, intense burst by one pod can ruin a node — but if your agent only reads a counter every few
+    seconds, the burst is averaged away. The same data, bucketed at sub-interval resolution, keeps the spike visible.</p>
+    <div class="grid">
+      <div>
+        <div class="ctrl"><label>Scrape interval <b id="s1_intervalV">5.0 s</b></label>
+          <input id="s1_interval" type="range" min="1000" max="10000" step="500" value="5000"></div>
+        <div class="ctrl"><label>Bucket size <b id="s1_bucketV">100 ms</b></label>
+          <input id="s1_bucket" type="range" min="50" max="1000" step="50" value="100"></div>
+        <div class="ctrl"><label>Burst duration <b id="s1_durV">200 ms</b></label>
+          <input id="s1_dur" type="range" min="50" max="3000" step="50" value="200"></div>
+        <div class="ctrl"><label>Burst start <b id="s1_startV">2.0 s</b></label>
+          <input id="s1_start" type="range" min="0" max="9000" step="100" value="2000"></div>
+        <div class="ctrl"><label>Burst intensity <b id="s1_peakV">95 %</b></label>
+          <input id="s1_peak" type="range" min="10" max="100" step="5" value="95"></div>
+        <div class="ctrl"><label>Baseline load <b id="s1_baseV">15 %</b></label>
+          <input id="s1_base" type="range" min="0" max="60" step="5" value="15"></div>
+      </div>
+      <div>
+        <canvas id="s1_canvas" width="640" height="280"></canvas>
+        <div class="legend">
+          <span><i style="background:var(--blue)"></i>per-bucket load</span>
+          <span><i style="background:var(--amber)"></i>5 s average</span>
+          <span><i style="background:var(--red)"></i>alert threshold (70%)</span>
+        </div>
+        <div class="readout">
+          <div class="stat"><div class="k">Interval average</div><div class="v" id="s1_avg">—</div></div>
+          <div class="stat"><div class="k">Peak bucket</div><div class="v" id="s1_peakbucket">—</div></div>
+          <div class="stat"><div class="k">Buckets in window</div><div class="v" id="s1_nbuckets">—</div></div>
+        </div>
+        <div class="verdict idle" id="s1_verdict">—</div>
+      </div>
+    </div>
+    <p class="note">Drag <b>bucket size</b> up toward the scrape interval and watch the spike melt into the average —
+    that's exactly what a coarse counter does. Shrink it and the burst reappears. This is why the kernel keeps a small
+    ring of sub-interval buckets instead of one number per interval.</p>
+  </section>
+
+  <!-- ================= SIM 2 ================= -->
+  <section id="t2" class="panel hidden">
+    <h2>Co-occurrence, not magnitude</h2>
+    <p class="sub">Two pods on the same node, 50 buckets of 100 ms. The offender bursts; the victim's run-queue stalls a
+    beat later. We score the <b>shape</b> agreement with a lagged Pearson correlation — so a legitimately busy pod that
+    hurts no one scores low, and a moderate-but-disruptive pod scores high.</p>
+    <div class="grid">
+      <div>
+        <div class="ctrl"><label>Offender burst height <b id="s2_offH">80 %</b></label>
+          <input id="s2_offH_r" type="range" min="10" max="100" step="5" value="80"></div>
+        <div class="ctrl"><label>Coupling (victim responds) <b id="s2_coupV">0.80</b></label>
+          <input id="s2_coup" type="range" min="0" max="100" step="5" value="80"></div>
+        <div class="ctrl"><label>Victim response lag <b id="s2_lagV">1 bucket</b></label>
+          <input id="s2_lag" type="range" min="0" max="4" step="1" value="1"></div>
+        <div class="ctrl"><label>Background noise <b id="s2_noiseV">10 %</b></label>
+          <input id="s2_noise" type="range" min="0" max="50" step="5" value="10"></div>
+        <div class="ctrl"><label>Independent victim spike <b id="s2_indV">off</b></label>
+          <input id="s2_ind" type="range" min="0" max="100" step="10" value="0"></div>
+        <div class="ctrl"><label>Min active buckets (gate) <b id="s2_gateV">4</b></label>
+          <input id="s2_gate" type="range" min="1" max="12" step="1" value="4"></div>
+        <button id="s2_reroll" class="tab" style="border:1px solid var(--line);border-radius:6px;margin-top:4px">↻ re-roll noise</button>
+      </div>
+      <div>
+        <canvas id="s2_canvas" width="640" height="300"></canvas>
+        <div class="legend">
+          <span><i style="background:var(--red)"></i>offender (CPU / throttle)</span>
+          <span><i style="background:var(--blue)"></i>victim (run-queue latency)</span>
+        </div>
+        <div class="readout">
+          <div class="stat"><div class="k">Pearson r (lagged)</div><div class="v" id="s2_r">—</div></div>
+          <div class="stat"><div class="k">Active buckets</div><div class="v" id="s2_active">—</div></div>
+          <div class="stat"><div class="k">Confidence</div><div class="v" id="s2_conf">—</div></div>
+        </div>
+        <div class="verdict idle" id="s2_verdict">—</div>
+      </div>
+    </div>
+    <p class="note">Turn <b>coupling</b> to 0 and crank the offender height: huge magnitude, but no correlation → low
+    confidence. That's the whole point — busy ≠ guilty. Now turn <b>independent victim spike</b> up: the victim is
+    suffering, but not from this pod, and the gate plus correlation refuse to blame it. Drop <b>active buckets</b> low and
+    a single coincident blip can sneak through — which is why the real gate stays strict.</p>
+  </section>
+
+  <p class="note">Part of <a href="../ARCHITECTURE.md">node-sentinel</a>. Open this file in any browser — no build, no
+  dependencies. It's a design sketch of the planned sub-interval correlation, not a measurement of the running agent.</p>
+</main>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const clamp = (x,a,b) => Math.max(a, Math.min(b, x));
+
+// ---- tabs ----
+document.querySelectorAll(".tab[data-tab]").forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll(".tab[data-tab]").forEach(b => b.classList.toggle("active", b === btn));
+    $("t1").classList.toggle("hidden", btn.dataset.tab !== "t1");
+    $("t2").classList.toggle("hidden", btn.dataset.tab !== "t2");
+  };
+});
+
+// ======================= SIM 1 =======================
+const s1 = {
+  interval: $("s1_interval"), bucket: $("s1_bucket"), dur: $("s1_dur"),
+  start: $("s1_start"), peak: $("s1_peak"), base: $("s1_base"), c: $("s1_canvas"),
+};
+function s1Draw() {
+  const interval = +s1.interval.value, bucketMs = +s1.bucket.value;
+  const dur = +s1.dur.value, start = +s1.start.value;
+  const peak = +s1.peak.value, base = +s1.base.value;
+  $("s1_intervalV").textContent = (interval/1000).toFixed(1) + " s";
+  $("s1_bucketV").textContent = bucketMs + " ms";
+  $("s1_durV").textContent = dur + " ms";
+  $("s1_startV").textContent = (start/1000).toFixed(1) + " s";
+  $("s1_peakV").textContent = peak + " %";
+  $("s1_baseV").textContent = base + " %";
+
+  const n = Math.max(1, Math.round(interval / bucketMs));
+  const vals = [];
+  for (let i = 0; i < n; i++) {
+    const b0 = i * bucketMs, b1 = b0 + bucketMs;
+    const overlap = Math.max(0, Math.min(b1, start + dur) - Math.max(b0, start));
+    const frac = overlap / bucketMs;            // fraction of this bucket inside the burst
+    vals.push(base + frac * (peak - base));
+  }
+  const avg = vals.reduce((a,b)=>a+b,0) / n;
+  const pk = Math.max(...vals);
+
+  $("s1_avg").textContent = avg.toFixed(1) + " %";
+  $("s1_peakbucket").textContent = pk.toFixed(0) + " %";
+  $("s1_nbuckets").textContent = n;
+
+  const v = $("s1_verdict");
+  if (pk >= 70 && avg < 70) {
+    v.className = "verdict bad";
+    v.innerHTML = "🚨 The peak bucket hits <b>" + pk.toFixed(0) + "%</b> — a real spike — but the interval average is only <b>"
+      + avg.toFixed(1) + "%</b>. A counter scraped once per interval would call this node healthy. The bucket catches it.";
+  } else if (pk >= 70) {
+    v.className = "verdict warn";
+    v.innerHTML = "Both the average and the peak are high — a sustained hog. Easy to catch either way; the interesting case is a short burst (shrink the duration).";
+  } else {
+    v.className = "verdict idle";
+    v.innerHTML = "Nothing crosses the 70% line. Raise the intensity or lengthen the burst to create a spike worth hiding.";
+  }
+  s1Render(vals, avg, n);
+}
+function s1Render(vals, avg, n) {
+  const cv = s1.c, ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height, padL = 36, padB = 24, padT = 14, padR = 12;
+  ctx.clearRect(0,0,W,H);
+  const plotW = W - padL - padR, plotH = H - padB - padT;
+  const y = pct => padT + plotH * (1 - pct/100);
+  // gridlines
+  ctx.strokeStyle = "#1c2530"; ctx.fillStyle = "#5b6b7b"; ctx.font = "11px sans-serif"; ctx.textAlign = "right";
+  for (let p = 0; p <= 100; p += 25) { ctx.beginPath(); ctx.moveTo(padL, y(p)); ctx.lineTo(W-padR, y(p)); ctx.stroke(); ctx.fillText(p+"%", padL-6, y(p)+3); }
+  // bars
+  const bw = plotW / n;
+  for (let i = 0; i < n; i++) {
+    const h = plotH * (vals[i]/100);
+    ctx.fillStyle = vals[i] >= 70 ? "#d6584f" : "#58a6ff";
+    ctx.fillRect(padL + i*bw + 0.5, padT + plotH - h, Math.max(1, bw-1), h);
+  }
+  // average line
+  ctx.strokeStyle = "#d6a32a"; ctx.lineWidth = 2; ctx.setLineDash([6,4]);
+  ctx.beginPath(); ctx.moveTo(padL, y(avg)); ctx.lineTo(W-padR, y(avg)); ctx.stroke();
+  // threshold line
+  ctx.strokeStyle = "#d6584f"; ctx.lineWidth = 1; ctx.setLineDash([3,3]);
+  ctx.beginPath(); ctx.moveTo(padL, y(70)); ctx.lineTo(W-padR, y(70)); ctx.stroke();
+  ctx.setLineDash([]); ctx.lineWidth = 1;
+}
+[s1.interval,s1.bucket,s1.dur,s1.start,s1.peak,s1.base].forEach(el => el.addEventListener("input", s1Draw));
+
+// ======================= SIM 2 =======================
+const N2 = 50; // buckets
+let noiseSeed = [];
+function reseed() { noiseSeed = Array.from({length: N2*2}, () => Math.random()); }
+reseed();
+
+const s2 = {
+  offH: $("s2_offH_r"), coup: $("s2_coup"), lag: $("s2_lag"), noise: $("s2_noise"),
+  ind: $("s2_ind"), gate: $("s2_gate"), c: $("s2_canvas"),
+};
+function bump(arr, center, width, height) {
+  for (let i = 0; i < arr.length; i++) {
+    const d = (i - center) / width;
+    arr[i] += height * Math.exp(-0.5 * d * d);
+  }
+}
+function pearson(X, Y, lag) {
+  const n = X.length - lag;
+  if (n < 3) return {r: 0, n};
+  let sx=0, sy=0, sxy=0, sxx=0, syy=0;
+  for (let i = 0; i < n; i++) {
+    const x = X[i], y = Y[i+lag];     // offender earlier, victim later
+    sx += x; sy += y; sxy += x*y; sxx += x*x; syy += y*y;
+  }
+  const num = n*sxy - sx*sy;
+  const den = Math.sqrt((n*sxx - sx*sx) * (n*syy - sy*sy));
+  return {r: den === 0 ? 0 : num/den, n};
+}
+function s2Draw() {
+  const offH = +s2.offH.value, coup = +s2.coup.value/100, lag = +s2.lag.value;
+  const noise = +s2.noise.value, ind = +s2.ind.value, gate = +s2.gate.value;
+  $("s2_offH").textContent = offH + " %";
+  $("s2_coupV").textContent = coup.toFixed(2);
+  $("s2_lagV").textContent = lag + (lag === 1 ? " bucket" : " buckets");
+  $("s2_noiseV").textContent = noise + " %";
+  $("s2_indV").textContent = ind === 0 ? "off" : ind + " %";
+  $("s2_gateV").textContent = gate;
+
+  const off = new Array(N2).fill(0), vic = new Array(N2).fill(0);
+  // background noise (deterministic per reseed)
+  for (let i = 0; i < N2; i++) {
+    off[i] = noise * noiseSeed[i];
+    vic[i] = noise * noiseSeed[i + N2];
+  }
+  // offender burst around bucket 20
+  bump(off, 20, 3, offH);
+  // victim responds to offender, lagged, scaled by coupling
+  for (let i = 0; i < N2; i++) {
+    const src = i - lag;
+    if (src >= 0) vic[i] += coup * (off[src] - noise * noiseSeed[src]); // couple to the burst, not the noise
+  }
+  // an independent victim spike elsewhere (bucket 38) — suffering, but not from this offender
+  if (ind > 0) bump(vic, 38, 3, ind);
+  // clamp to 0..100
+  for (let i = 0; i < N2; i++) { off[i] = clamp(off[i],0,100); vic[i] = clamp(vic[i],0,100); }
+
+  const thr = 25; // "active" = above this
+  const offActive = off.filter(v => v > thr).length;
+  const vicActive = vic.filter(v => v > thr).length;
+  const active = Math.min(offActive, vicActive);
+
+  const {r} = pearson(off, vic, lag);
+  $("s2_r").textContent = r.toFixed(2);
+  $("s2_active").textContent = active + " / " + gate;
+
+  const v = $("s2_verdict");
+  let conf = 0;
+  if (active < gate) {
+    conf = 0;
+    $("s2_conf").textContent = "—";
+    v.className = "verdict idle";
+    v.innerHTML = "<b>Below the activity gate.</b> Only " + active + " active bucket(s) on the weaker side, need " + gate
+      + ". Correlation on this little data is noise — node-sentinel refuses to score it. (\"can't tell\" beats a guess.)";
+  } else {
+    conf = clamp(r, 0, 1) * 100;
+    $("s2_conf").textContent = conf.toFixed(0) + " %";
+    if (conf >= 70) {
+      v.className = "verdict bad";
+      v.innerHTML = "🚨 <b>Offender confirmed — " + conf.toFixed(0) + "%.</b> The victim's stalls track the offender's bursts "
+        + (lag ? "(" + lag + " bucket later) " : "") + "in shape, not just size. This crosses the gate.";
+    } else if (conf >= 35) {
+      v.className = "verdict warn";
+      v.innerHTML = "Some shape agreement (" + conf.toFixed(0) + "%), but below the 70% gate — <b>alert-only</b>, never acted on.";
+    } else {
+      v.className = "verdict good";
+      v.innerHTML = "Low correlation (" + conf.toFixed(0) + "%). The offender may be loud, but the victim isn't moving with it — "
+        + "<b>not blamed.</b> Busy ≠ guilty.";
+    }
+  }
+  s2Render(off, vic, conf);
+}
+function s2Render(off, vic, conf) {
+  const cv = s2.c, ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height, padL = 30, padR = 12, padT = 12, padB = 26;
+  ctx.clearRect(0,0,W,H);
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const bw = plotW / N2;
+  ctx.strokeStyle = "#1c2530";
+  for (let p = 0; p <= 100; p += 25) {
+    const yy = padT + plotH * (1 - p/100);
+    ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(W-padR, yy); ctx.stroke();
+  }
+  // overlap shading where both active
+  for (let i = 0; i < N2; i++) {
+    if (off[i] > 25 && vic[i] > 25) {
+      ctx.fillStyle = "rgba(126,226,184,.10)";
+      ctx.fillRect(padL + i*bw, padT, bw, plotH);
+    }
+  }
+  // offender bars (red, upper half mirrored from top) and victim bars (blue, from bottom)
+  for (let i = 0; i < N2; i++) {
+    const ho = plotH/2 * (off[i]/100), hv = plotH/2 * (vic[i]/100);
+    const mid = padT + plotH/2;
+    ctx.fillStyle = "rgba(214,88,79,.85)";
+    ctx.fillRect(padL + i*bw + 0.5, mid - ho, Math.max(1, bw-1), ho);
+    ctx.fillStyle = "rgba(88,166,255,.85)";
+    ctx.fillRect(padL + i*bw + 0.5, mid, Math.max(1, bw-1), hv);
+  }
+  // midline + axis label
+  const mid = padT + plotH/2;
+  ctx.strokeStyle = "#2a3441"; ctx.beginPath(); ctx.moveTo(padL, mid); ctx.lineTo(W-padR, mid); ctx.stroke();
+  ctx.fillStyle = "#5b6b7b"; ctx.font = "11px sans-serif"; ctx.textAlign = "left";
+  ctx.fillText("offender ↑", padL+2, padT+12);
+  ctx.fillText("victim ↓", padL+2, padT+plotH-4);
+  ctx.textAlign = "center";
+  ctx.fillText("time → 50 buckets × 100 ms = 5 s window", W/2, H-8);
+}
+[s2.offH,s2.coup,s2.lag,s2.noise,s2.ind,s2.gate].forEach(el => el.addEventListener("input", s2Draw));
+$("s2_reroll").onclick = () => { reseed(); s2Draw(); };
+
+// init
+s1Draw(); s2Draw();
+</script>
+</body>
+</html>
