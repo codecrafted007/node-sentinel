@@ -2,10 +2,16 @@
 
 All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project is
-pre-1.0 (no released versions yet). For the detailed slice-by-slice log, see
+pre-1.0. For the detailed slice-by-slice log, see
 [`docs/PROGRESS.md`](docs/PROGRESS.md).
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-06-20
+
+First public **preview** release. Detection is built and validated end-to-end on a
+live cluster; remediation is observe-only (alert, never act). Pre-1.0: APIs, CRDs,
+and flags may change.
 
 ### Added
 - **Detection (agent), all three dimensions:** eBPF observers for CPU scheduling
@@ -36,4 +42,5 @@ pre-1.0 (no released versions yet). For the detailed slice-by-slice log, see
 - `NodeHealthPolicy` CRD + decision engine.
 - Remediation (taint / cordon / evict) under confidence gates.
 
-[Unreleased]: https://github.com/codecrafted007/node-sentinel/commits/main
+[Unreleased]: https://github.com/codecrafted007/node-sentinel/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/codecrafted007/node-sentinel/releases/tag/v0.1.0
