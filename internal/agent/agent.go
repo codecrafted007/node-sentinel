@@ -27,6 +27,7 @@ type Agent struct {
 	blkio       *ebpf.BlkioObserver
 	net         *ebpf.NetObserver
 	resolver    *cgroup.Resolver
+	timeline    []ebpf.CgroupTimeline // latest sub-interval ring (issue #4); scored by issue #5 next
 	baseline    *metrics.Baseline // run-queue latency normals (victim side)
 	ioBaseline  *metrics.Baseline // I/O latency normals (victim side)
 	netBaseline *metrics.Baseline // retransmit normals (victim side)
@@ -147,6 +148,12 @@ func (a *Agent) report() error {
 	runq, err := a.sched.Read()
 	if err != nil {
 		return err
+	}
+	// Drain the sub-interval ring every interval to keep the bounded map clean
+	// (read-and-delete). The correlation scorer (issue #5) consumes this next;
+	// for now we just stash the latest so the map never fills.
+	if tl, err := a.sched.ReadTimeline(); err == nil {
+		a.timeline = tl
 	}
 	var blkio []ebpf.CgroupBlkio
 	if a.blkio != nil {

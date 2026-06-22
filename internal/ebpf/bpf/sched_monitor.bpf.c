@@ -21,11 +21,34 @@
 #define MAX_CGROUPS 4096
 #define MAX_TASKS   65536
 
+/* Sub-interval timeline ring (issue #4): a coarse time dimension so user space
+ * can correlate an offender's CPU bursts against a victim's run-queue stalls in
+ * the SAME 100ms window, instead of averaging both away over a 5s scrape. */
+#define NUM_BUCKETS        50            /* 50 x 100ms = a rolling 5s timeline */
+#define BUCKET_NS          100000000ULL  /* 100ms sub-interval width */
+#define MAX_ACTIVE_CGROUPS 512           /* realistic active cgroups/node; bounds map memory */
+
 /* A log2 histogram of run-queue latency (microseconds) for one cgroup. */
 struct sched_hist {
 	__u64 slots[MAX_SLOTS]; /* slots[i] counts waits in [2^i, 2^(i+1)) us */
 	__u64 total_us;         /* sum of all waits, used for the mean */
 	__u64 count;            /* number of waits */
+};
+
+/* One 100ms time bucket for a cgroup (issue #4). A ring of these gives the
+ * coarse timeline the user-space correlation scorer needs (see
+ * internal/metrics/correlation.go + docs/sim/temporal-correlation.html #2). */
+struct sched_bucket {
+	__u64 epoch;        /* absolute window number (ktime / BUCKET_NS) this slot holds */
+	__u64 runq_lat_ns;  /* VICTIM: summed run-queue wait in this window */
+	__u64 cpu_ns;       /* OFFENDER: on-CPU time charged in this window */
+	__u32 runq_count;   /* run-queue waits counted (activity-gate input) */
+	__u32 ctx_switches; /* on-CPU slices charged (activity-gate input) */
+};
+
+/* A fixed ring of NUM_BUCKETS windows = one cgroup's last ~5s, as a map value. */
+struct sched_buckets {
+	struct sched_bucket b[NUM_BUCKETS];
 };
 
 /* cgroup id -> run-queue latency histogram.
@@ -64,6 +87,18 @@ struct {
 	__type(value, __u64);
 } cpu_slice_start SEC(".maps");
 
+/* cgroup id -> rolling 5s timeline of (run-queue, cpu) per 100ms bucket.
+ * Per-CPU and lock-free like the histograms; user space drains and re-aligns
+ * the per-CPU copies by epoch each interval. max_entries is sized to a
+ * realistic active-cgroup count (NOT MAX_CGROUPS) to bound memory on high-core
+ * nodes, since cost is per-CPU x NUM_BUCKETS x sizeof(bucket) x max_entries. */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
+	__uint(max_entries, MAX_ACTIVE_CGROUPS);
+	__type(key, __u64);
+	__type(value, struct sched_buckets);
+} sched_timeline_map SEC(".maps");
+
 /* Return the histogram bucket for a value: floor(log2(value)), capped to the
  * last slot. Example: 800 -> 9, because 2^9 (512) <= 800 < 2^10 (1024). */
 static __always_inline __u64 log2_bucket(__u64 value)
@@ -101,6 +136,46 @@ static __always_inline void add_cpu_time(__u64 cgroup_id, __u64 nanoseconds)
 	__sync_fetch_and_add(total, nanoseconds);
 }
 
+/* Return the time bucket for `cgroup_id` covering the 100ms window that
+ * contains `now`, lazily resetting the slot if it still holds an older window.
+ *
+ * This is how one fixed ring of NUM_BUCKETS slots represents a sliding 5s
+ * timeline: each slot remembers which absolute window (epoch) it currently
+ * holds. When the ring wraps and we land on a slot from a previous revolution,
+ * its epoch won't match, so we zero it before use — discarding the stale window
+ * instead of mixing two windows' counts together. */
+static __always_inline struct sched_bucket *
+get_timeline_bucket(__u64 cgroup_id, __u64 now)
+{
+	struct sched_buckets *bs = bpf_map_lookup_elem(&sched_timeline_map, &cgroup_id);
+
+	if (!bs) {
+		struct sched_buckets empty = {};
+
+		bpf_map_update_elem(&sched_timeline_map, &cgroup_id, &empty, BPF_NOEXIST);
+		bs = bpf_map_lookup_elem(&sched_timeline_map, &cgroup_id);
+		if (!bs)
+			return 0;
+	}
+
+	__u64 epoch = now / BUCKET_NS;
+	__u32 idx = epoch % NUM_BUCKETS;
+
+	if (idx >= NUM_BUCKETS) /* tell the verifier the index is in range */
+		return 0;
+
+	struct sched_bucket *bkt = &bs->b[idx];
+
+	if (bkt->epoch != epoch) {
+		bkt->epoch = epoch; /* lazy reset: this slot held an older window */
+		bkt->runq_lat_ns = 0;
+		bkt->cpu_ns = 0;
+		bkt->runq_count = 0;
+		bkt->ctx_switches = 0;
+	}
+	return bkt;
+}
+
 /* A task became runnable: remember the time it was woken. */
 SEC("tp_btf/sched_wakeup")
 int BPF_PROG(handle_sched_wakeup, struct task_struct *task)
@@ -135,8 +210,17 @@ int BPF_PROG(handle_sched_switch, bool preempt, struct task_struct *prev,
 		 * idle time is not a pod's CPU usage. */
 		if (*slice_start != 0 && prev_pid != 0) {
 			__u64 cgroup_id = BPF_CORE_READ(prev, cgroups, dfl_cgrp, kn, id);
+			__u64 slice_ns = now - *slice_start;
 
-			add_cpu_time(cgroup_id, now - *slice_start);
+			add_cpu_time(cgroup_id, slice_ns);
+
+			/* OFFENDER, time-resolved: charge this slice to the 100ms bucket. */
+			struct sched_bucket *bkt = get_timeline_bucket(cgroup_id, now);
+
+			if (bkt) {
+				__sync_fetch_and_add(&bkt->cpu_ns, slice_ns);
+				__sync_fetch_and_add(&bkt->ctx_switches, 1);
+			}
 		}
 		*slice_start = now;
 	}
@@ -148,11 +232,21 @@ int BPF_PROG(handle_sched_switch, bool preempt, struct task_struct *prev,
 	if (!wakeup_time)
 		return 0;
 
-	__u64 wait_us = (now - *wakeup_time) / 1000;
+	__u64 wait_ns = now - *wakeup_time;
+	__u64 wait_us = wait_ns / 1000;
 
 	bpf_map_delete_elem(&wakeup_ts_map, &next_pid);
 
 	__u64 cgroup_id = BPF_CORE_READ(next, cgroups, dfl_cgrp, kn, id);
+
+	/* VICTIM, time-resolved: add this wait to the current 100ms bucket. */
+	struct sched_bucket *bkt = get_timeline_bucket(cgroup_id, now);
+
+	if (bkt) {
+		__sync_fetch_and_add(&bkt->runq_lat_ns, wait_ns);
+		__sync_fetch_and_add(&bkt->runq_count, 1);
+	}
+
 	struct sched_hist *hist = bpf_map_lookup_elem(&runq_latency_map, &cgroup_id);
 
 	if (!hist) {
