@@ -8,13 +8,13 @@ A running record of completed work, newest phase first. Roadmap lives in design 
 
 Goal: attribute a victim's stalls to the offender that caused them by the *shape* of bursts over sub-interval time, not magnitude (milestone "Temporal correlation (v0.2)", issues #2–#7).
 
-### Sub-interval time-bucketed histograms (`sched_monitor.bpf.c` + reader) — issue #4 ✅ (pending host verify)
-- Extended the sched observer (no new probes): `sched_switch` now also writes a per-cgroup **ring of 50 × 100ms buckets** (`sched_timeline_map`, `PERCPU_HASH`) — `runq_lat_ns`/`runq_count` (victim) charged to `next`'s bucket, `cpu_ns`/`ctx_switches` (offender) to `prev`'s. Lock-free integers only; all scoring stays in Go.
+### Sub-interval time-bucketed histograms (`sched_monitor.bpf.c` + reader) — issue #4 ✅ (host-verified, all 5 GKE nodes)
+- Extended the sched observer (no new probes): `sched_switch` now also writes a per-cgroup **ring of 64 × 100ms buckets** (`sched_timeline_map`, `PERCPU_HASH`) — `runq_lat_ns`/`runq_count` (victim) charged to `next`'s bucket, `cpu_ns`/`ctx_switches` (offender) to `prev`'s. Lock-free integers only; all scoring stays in Go.
 - **Epoch-per-bucket lazy reset:** each slot stores the absolute window number it holds; when the ring wraps onto a stale slot the epoch mismatches and it's zeroed before use, so an unaligned drain never mixes two windows (per the design note).
-- **Memory bounded:** `max_entries = MAX_ACTIVE_CGROUPS (512)`, not `MAX_CGROUPS`, so cost (per-CPU × 50 × 32B × entries) stays ~tens of MB on high-core nodes instead of ballooning.
+- **Memory bounded:** `max_entries = MAX_ACTIVE_CGROUPS (512)`, not `MAX_CGROUPS`, so cost (per-CPU × 64 × 32B × entries) stays a few MB instead of ballooning (~3 MB at 4 vCPU).
 - **`ReadTimeline()`** (`internal/ebpf/sched.go`): read-and-delete drain that re-aligns the per-CPU copies by epoch onto **one shared axis ending at `now`** (CLOCK_MONOTONIC, matching `bpf_ktime`) — essential because offender and victim are different cgroups and must share a time axis to correlate. Returns `[]CgroupTimeline` (`types.go`), zero-filling empty windows — exactly the aligned `[]float64`-shaped series `metrics.Correlate` consumes.
 - Agent drains the ring each interval (keeps the bounded map clean) and stashes the latest for the scorer; bpf2go `-type` extended for the new structs; `x/sys` promoted to a direct dep for the monotonic clock.
-- ⏳ **Needs Linux-host build to verify** clang compiles it and the verifier accepts the new map/helper (can't compile eBPF on macOS).
+- **Two host-only bugs the GKE build caught** (macOS can't compile/load eBPF): (1) a 1600-byte `struct sched_buckets` zeroed on the BPF stack blew the 512-byte stack limit → fixed with a zeroed per-CPU `timeline_zero` scratch map as the insert template; (2) a `% NUM_BUCKETS` ring index the verifier couldn't bound (`math between map_value pointer and register with unbounded min value`) → made `NUM_BUCKETS` a power of two (64) and index with a bitmask. Verified live: agent loads + attaches on all 5 nodes (Ubuntu 24.04, kernel 6.8), `ReadTimeline` drains every interval with zero errors.
 
 ### Lagged correlation scorer (`internal/metrics/correlation.go`) — issue #5 ✅
 - Pure-Go, unit-tested on any platform (mirrors `histogram.go`), ported from `docs/sim/temporal-correlation.html` (sim #2). The kernel only accumulates integers; all floating-point scoring stays here, hot-swappable.

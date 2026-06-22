@@ -24,7 +24,10 @@
 /* Sub-interval timeline ring (issue #4): a coarse time dimension so user space
  * can correlate an offender's CPU bursts against a victim's run-queue stalls in
  * the SAME 100ms window, instead of averaging both away over a 5s scrape. */
-#define NUM_BUCKETS        50            /* 50 x 100ms = a rolling 5s timeline */
+#define NUM_BUCKETS        64            /* 64 x 100ms = a rolling 6.4s timeline.
+                                          * MUST be a power of two: we index the
+                                          * ring with a bitmask so the verifier
+                                          * can bound the array access. */
 #define BUCKET_NS          100000000ULL  /* 100ms sub-interval width */
 #define MAX_ACTIVE_CGROUPS 512           /* realistic active cgroups/node; bounds map memory */
 
@@ -99,6 +102,17 @@ struct {
 	__type(value, struct sched_buckets);
 } sched_timeline_map SEC(".maps");
 
+/* A zeroed scratch template for creating new timeline entries. struct
+ * sched_buckets is 1600 bytes — far over the 512-byte BPF stack limit — so we
+ * cannot zero one on the stack. This per-CPU array is zero-initialised at load
+ * and never written, so it stays all-zeros: exactly what a fresh entry needs. */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct sched_buckets);
+} timeline_zero SEC(".maps");
+
 /* Return the histogram bucket for a value: floor(log2(value)), capped to the
  * last slot. Example: 800 -> 9, because 2^9 (512) <= 800 < 2^10 (1024). */
 static __always_inline __u64 log2_bucket(__u64 value)
@@ -150,19 +164,23 @@ get_timeline_bucket(__u64 cgroup_id, __u64 now)
 	struct sched_buckets *bs = bpf_map_lookup_elem(&sched_timeline_map, &cgroup_id);
 
 	if (!bs) {
-		struct sched_buckets empty = {};
+		__u32 zero = 0;
+		struct sched_buckets *tmpl = bpf_map_lookup_elem(&timeline_zero, &zero);
 
-		bpf_map_update_elem(&sched_timeline_map, &cgroup_id, &empty, BPF_NOEXIST);
+		if (!tmpl)
+			return 0;
+		bpf_map_update_elem(&sched_timeline_map, &cgroup_id, tmpl, BPF_NOEXIST);
 		bs = bpf_map_lookup_elem(&sched_timeline_map, &cgroup_id);
 		if (!bs)
 			return 0;
 	}
 
 	__u64 epoch = now / BUCKET_NS;
-	__u32 idx = epoch % NUM_BUCKETS;
-
-	if (idx >= NUM_BUCKETS) /* tell the verifier the index is in range */
-		return 0;
+	/* NUM_BUCKETS is a power of two, so the mask both wraps the ring and gives
+	 * the verifier a hard 0..NUM_BUCKETS-1 bound on the array index (a plain
+	 * "% NUM_BUCKETS" leaves the index unbounded as far as the verifier can
+	 * prove, and it rejects the pointer math). */
+	__u32 idx = epoch & (NUM_BUCKETS - 1);
 
 	struct sched_bucket *bkt = &bs->b[idx];
 

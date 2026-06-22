@@ -23,8 +23,8 @@ type CgroupCPUTime struct {
 
 // Timeline geometry — must match NUM_BUCKETS / BUCKET_NS in sched_monitor.bpf.c.
 const (
-	TimelineBuckets  = 50              // 50 windows
-	TimelineBucketNs = 100_000_000     // 100ms each → a rolling 5s ring
+	TimelineBuckets  = 64          // 64 windows (power of two: the BPF ring is bitmask-indexed)
+	TimelineBucketNs = 100_000_000 // 100ms each → a rolling 6.4s ring
 )
 
 // CgroupTimeline is one cgroup's sub-interval timeline (issue #4), drained and
