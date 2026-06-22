@@ -6,6 +6,7 @@ Start here, then follow the path that fits what you need.
 - [`CONCEPTS.md`](CONCEPTS.md) — what node-sentinel does and how it decides, in plain English (offender/victim, baselines, confidence). Tagged ✅ built / 🔜 planned.
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — three diagrams: where it runs, how data flows, inside one agent.
 - [`HOW.md`](HOW.md) — how the eBPF probe is compiled, embedded (bpf2go + `go:embed`), loaded, and attached.
+- [`DEEPDIVE.md`](DEEPDIVE.md) — **the "GOD book."** Everything from foundation to top in one read: why it exists, what eBPF is, how we capture the data, cgroups/PIDs internals, C↔Go embedding, how Go reads the maps, and the full decision model — with diagrams, equations, and a line-by-line trace. Start here if you want to understand *every* number the agent prints.
 - [`sim/temporal-correlation.html`](sim/temporal-correlation.html) — two interactive toys (open in any browser, no build): why a coarse scrape hides short bursts, and how shape-not-magnitude correlation pins the offender. Models the 🔜 sub-interval correlation feature.
 
 ## Run it
