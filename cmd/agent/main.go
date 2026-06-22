@@ -29,6 +29,7 @@ func main() {
 	flag.IntVar(&cfg.TopN, "top", cfg.TopN, "number of cgroups to display")
 	flag.StringVar(&cfg.CRISocket, "cri-socket", cfg.CRISocket, "CRI endpoint for pod resolution")
 	flag.StringVar(&cfg.CgroupRoot, "cgroup-root", cfg.CgroupRoot, "cgroups v2 subtree to scan for pods")
+	flag.DurationVar(&cfg.CacheTTL, "cache-ttl", cfg.CacheTTL, "how long a vanished cgroup's pod name is retained so late stats still resolve")
 	flag.IntVar(&cfg.MinSamples, "min-samples", cfg.MinSamples, "min run-queue samples before a pod counts as a victim")
 	flag.DurationVar(&cfg.RunqWarn, "runq-warn", cfg.RunqWarn, "run-queue p99 a pod must exceed to count as contention")
 	flag.Float64Var(&cfg.DeviationFactor, "deviation", cfg.DeviationFactor, "x over a pod's own baseline p99 to count as a victim (once warm)")

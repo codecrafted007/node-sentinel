@@ -21,6 +21,7 @@ import (
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target bpfel -type sched_hist -type sched_bucket -type sched_buckets sched bpf/sched_monitor.bpf.c -- -I./bpf -O2 -g -Wall
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target bpfel -type blkio_hist blkio bpf/blkio_monitor.bpf.c -- -I./bpf -O2 -g -Wall
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target bpfel -type net_stats net bpf/net_monitor.bpf.c -- -I./bpf -O2 -g -Wall
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target bpfel -type cgroup_event cgroup bpf/cgroup_monitor.bpf.c -- -I./bpf -O2 -g -Wall
 
 // SchedObserver loads sched_monitor, attaches its tracepoints, and exposes the
 // per-cgroup run-queue latency map for reading.

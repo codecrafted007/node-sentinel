@@ -19,6 +19,10 @@ type Config struct {
 	// ResolveRefresh is how often the cgroup->pod map is rebuilt (design §7.4
 	// keeps a 60s full rescan as a safety net; we drive it on this interval).
 	ResolveRefresh time.Duration
+	// CacheTTL is how long a vanished cgroup's pod name is retained after it
+	// disappears, so a short-lived pod's final-interval stats still resolve
+	// instead of dropping to unknown (issue #3).
+	CacheTTL time.Duration
 
 	// --- contention thresholds (the first real policy knobs) ---
 
@@ -87,6 +91,7 @@ func DefaultConfig() Config {
 		CRISocket:      "unix:///run/containerd/containerd.sock",
 		CgroupRoot:     "/sys/fs/cgroup/kubepods.slice",
 		ResolveRefresh: 60 * time.Second, // safety-net rescan; the watcher handles liveness
+		CacheTTL:       30 * time.Second, // keep vanished cgroups nameable for ~6 read intervals
 		MinSamples:          100,
 		RunqWarn:            5 * time.Millisecond,
 		DeviationFactor:     3.0,
