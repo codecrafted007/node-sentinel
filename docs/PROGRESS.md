@@ -8,6 +8,16 @@ A running record of completed work, newest phase first. Roadmap lives in design 
 
 Goal: attribute a victim's stalls to the offender that caused them by the *shape* of bursts over sub-interval time, not magnitude (milestone "Temporal correlation (v0.2)", issues #2–#7).
 
+### TTL'd resolver cache so late stats stay nameable — issue #3 ✅ (host-verified)
+- `internal/cgroup/ttlcache.go`: the `cgroup_id -> PodID` cache now keeps a vanished cgroup's name for a grace period (`CacheTTL`, default 30s ≈ 6 read intervals) instead of dropping it the instant the cgroup disappears — so a histogram captured in a pod's *final* interval still resolves instead of going `unknown`. Live entries never expire; an entry only ages out once absent (or tombstoned) past the TTL. Injectable clock → **6 portable unit tests on macOS** (live-never-expire, grace survival, deadline-doesn't-reset, get-rejects-expired, tombstone, put).
+- `PodID` moved to a portable file so the cache + tests build anywhere; resolver `Refresh` now *merges* (`cache.replace`) rather than wholesale-replacing.
+
+### In-kernel cgroup lifecycle watcher — issue #2 ✅ (host-verified)
+- `internal/ebpf/bpf/cgroup_monitor.bpf.c`: `tp_btf/cgroup_mkdir` + `cgroup_rmdir` emit `(cgroup_id, op, path)` to a **BPF ring buffer** (first ringbuf in the project); the kernel side just records + emits, all parsing/CRI join is in Go. A short-lived container is named at *birth* (lazy `ContainerStatus` join → `cache.put`) and tombstoned at *death*, far more reliably than fsnotify+rescan (which drops events under load / sub-debounce churn).
+- `internal/ebpf/cgroup.go`: `CgroupObserver` loads + attaches the tracepoints and streams events via `ringbuf.Reader`; the agent runs a goroutine dispatching mkdir→`ResolveCgroupPath`, rmdir→`Tombstone`. Best-effort (fsnotify is the fallback).
+- **Host-verified** on all 5 GKE nodes: the two tp_btf programs pass the verifier, the ringbuf attaches, and a short-lived (~8s) burster was attributed **by name** (`sentinel-system/shortlived-hog/hog`, not `system(cg:…)`) with zero lifecycle/ringbuf errors under churn. (Required a `_unused_cgroup_event` global to force BTF emission for bpf2go's `-type`, since a ringbuf has no value type.)
+- Known limit: if CRI hasn't registered the container at `cgroup_mkdir` time the lazy join no-ops and the periodic rescan is the backstop; tombstone + TTL (#3) cover capture-at-death regardless.
+
 ### Sub-interval time-bucketed histograms (`sched_monitor.bpf.c` + reader) — issue #4 ✅ (host-verified, all 5 GKE nodes)
 - Extended the sched observer (no new probes): `sched_switch` now also writes a per-cgroup **ring of 64 × 100ms buckets** (`sched_timeline_map`, `PERCPU_HASH`) — `runq_lat_ns`/`runq_count` (victim) charged to `next`'s bucket, `cpu_ns`/`ctx_switches` (offender) to `prev`'s. Lock-free integers only; all scoring stays in Go.
 - **Epoch-per-bucket lazy reset:** each slot stores the absolute window number it holds; when the ring wraps onto a stale slot the epoch mismatches and it's zeroed before use, so an unaligned drain never mixes two windows (per the design note).

@@ -27,6 +27,7 @@ type Agent struct {
 	blkio       *ebpf.BlkioObserver
 	net         *ebpf.NetObserver
 	resolver    *cgroup.Resolver
+	cgroupLC    *ebpf.CgroupObserver       // in-kernel cgroup mkdir/rmdir watcher (issue #2)
 	timeline    []ebpf.CgroupTimeline      // latest sub-interval ring (issue #4); scored by issue #5 next
 	prevThrottle map[uint64]cgroup.CPUStat // last interval's cpu.stat per offender cgroup, for throttle deltas (issue #6)
 	baseline    *metrics.Baseline // run-queue latency normals (victim side)
@@ -81,7 +82,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 
 	// Pod resolution is best-effort — the agent still runs if CRI is down.
-	if res, err := cgroup.NewResolver(a.cfg.CRISocket, a.cfg.CgroupRoot); err != nil {
+	if res, err := cgroup.NewResolver(a.cfg.CRISocket, a.cfg.CgroupRoot, a.cfg.CacheTTL); err != nil {
 		fmt.Printf("warning: pod resolver disabled (%v); showing raw cgroup IDs\n", err)
 	} else {
 		a.resolver = res
@@ -93,6 +94,18 @@ func (a *Agent) Run(ctx context.Context) error {
 		} else {
 			go w.Run(ctx, func() { _ = a.resolver.Refresh(ctx) })
 			fmt.Printf("cgroup watcher: live pod updates enabled\n")
+		}
+
+		// In-kernel cgroup lifecycle watcher (issue #2): names short-lived
+		// containers at birth and tombstones them at death, far more reliably
+		// than the fsnotify+rescan path. Best-effort — fsnotify is the fallback.
+		if lc, err := ebpf.LoadCgroup(); err != nil {
+			fmt.Printf("warning: cgroup lifecycle watcher disabled (%v); fsnotify + rescan only\n", err)
+		} else {
+			a.cgroupLC = lc
+			defer a.cgroupLC.Close()
+			go a.runLifecycle(ctx)
+			fmt.Printf("cgroup lifecycle watcher: in-kernel mkdir/rmdir enabled\n")
 		}
 	}
 
@@ -137,6 +150,25 @@ func (a *Agent) Run(ctx context.Context) error {
 			if err := a.report(); err != nil {
 				fmt.Printf("read error: %v\n", err)
 			}
+		}
+	}
+}
+
+// runLifecycle drains in-kernel cgroup lifecycle events (issue #2): name a new
+// container the instant its cgroup is created (lazy CRI join), and tombstone it
+// on teardown so its final-interval stats still resolve during the cache TTL.
+// Blocks until the observer is closed (agent shutdown).
+func (a *Agent) runLifecycle(ctx context.Context) {
+	for {
+		ev, err := a.cgroupLC.Read()
+		if err != nil {
+			return // reader closed
+		}
+		switch ev.Op {
+		case ebpf.CgroupOpMkdir:
+			a.resolver.ResolveCgroupPath(ctx, ev.CgroupID, ev.Path)
+		case ebpf.CgroupOpRmdir:
+			a.resolver.Tombstone(ev.CgroupID)
 		}
 	}
 }

@@ -38,24 +38,6 @@ const (
 //   docker:     docker-<64hex>.scope
 var scopeRe = regexp.MustCompile(`(?:cri-containerd-|crio-|docker-)([0-9a-f]{64})\.scope$`)
 
-// PodID identifies the pod/container a cgroup belongs to.
-type PodID struct {
-	Namespace string
-	Pod       string
-	Container string
-	PodUID    string
-	// RequestMilliCPU is the container's CPU request in millicores (0 if unknown
-	// or best-effort). Used to compute a pod's fair share of CPU.
-	RequestMilliCPU int64
-}
-
-func (p PodID) String() string {
-	if p.Namespace == "" {
-		return "unknown"
-	}
-	return p.Namespace + "/" + p.Pod + "/" + p.Container
-}
-
 // Resolver maps cgroup_id -> PodID, rebuilt by Refresh from the cgroup tree + CRI.
 type Resolver struct {
 	cgroupRoot string
@@ -64,8 +46,9 @@ type Resolver struct {
 
 	refreshMu sync.Mutex // serializes Refresh (watcher + periodic rescan)
 
+	cache *ttlCache // cgroup_id -> PodID, with a grace period so vanished cgroups stay nameable (issue #3)
+
 	mu    sync.RWMutex
-	cache map[uint64]PodID
 	paths map[uint64]string // cgroup_id -> cgroup dir, for per-interval cpu.stat reads
 }
 
@@ -77,8 +60,9 @@ type cgroupScope struct {
 	dir string
 }
 
-// NewResolver dials the CRI socket and performs an initial scan.
-func NewResolver(criSocket, cgroupRoot string) (*Resolver, error) {
+// NewResolver dials the CRI socket and performs an initial scan. cacheTTL is how
+// long a vanished cgroup's name is retained so late stats still resolve (issue #3).
+func NewResolver(criSocket, cgroupRoot string, cacheTTL time.Duration) (*Resolver, error) {
 	conn, err := grpc.NewClient(criSocket, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, fmt.Errorf("dial CRI %s: %w", criSocket, err)
@@ -87,7 +71,7 @@ func NewResolver(criSocket, cgroupRoot string) (*Resolver, error) {
 		cgroupRoot: cgroupRoot,
 		conn:       conn,
 		rt:         runtimeapi.NewRuntimeServiceClient(conn),
-		cache:      map[uint64]PodID{},
+		cache:      newTTLCache(cacheTTL),
 		paths:      map[uint64]string{},
 	}
 	if err := r.Refresh(context.Background()); err != nil {
@@ -100,17 +84,13 @@ func NewResolver(criSocket, cgroupRoot string) (*Resolver, error) {
 // Resolve returns the pod identity for a cgroup_id; ok is false for cgroups not
 // backed by a CRI container (system slices, pause sandboxes) — never attributed.
 func (r *Resolver) Resolve(cgroupID uint64) (PodID, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	p, ok := r.cache[cgroupID]
-	return p, ok
+	return r.cache.get(cgroupID)
 }
 
-// Len reports how many cgroups are currently resolved (diagnostics).
+// Len reports how many cgroups are currently resolved, including those within
+// their post-teardown grace period (diagnostics).
 func (r *Resolver) Len() int {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return len(r.cache)
+	return r.cache.len()
 }
 
 // Refresh rebuilds the cgroup_id -> PodID map: scan the cgroup tree for
@@ -150,11 +130,53 @@ func (r *Resolver) Refresh(ctx context.Context) error {
 		nextPaths[sc.ino] = sc.dir
 	}
 
+	r.cache.replace(next) // merge: live entries refresh, vanished ones keep their name until TTL
 	r.mu.Lock()
-	r.cache = next
 	r.paths = nextPaths
 	r.mu.Unlock()
 	return nil
+}
+
+// Tombstone marks a cgroup as torn down, starting its name's grace period (issue
+// #2: driven by a cgroup_rmdir event). The final-interval stats can still resolve
+// until the TTL elapses. Exported for the lifecycle watcher.
+func (r *Resolver) Tombstone(cgroupID uint64) { r.cache.tombstone(cgroupID) }
+
+// ResolveCgroupPath does a single-container CRI join for a freshly-created cgroup
+// and records the binding (issue #2: the lifecycle watcher's lazy join on
+// cgroup_mkdir, so a container that dies before the next full rescan is still
+// named). path is the cgroup path from the kernel event; it returns false (and
+// records nothing) for cgroups that aren't a CRI container scope, or when CRI
+// doesn't know the container yet (the periodic rescan is the backstop).
+func (r *Resolver) ResolveCgroupPath(ctx context.Context, cgroupID uint64, path string) bool {
+	m := scopeRe.FindStringSubmatch(path)
+	if m == nil {
+		return false // a slice / sandbox, not a container scope
+	}
+
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	resp, err := r.rt.ContainerStatus(cctx, &runtimeapi.ContainerStatusRequest{ContainerId: m[1]})
+	if err != nil {
+		return false // CRI hasn't registered it yet — rescan will catch it
+	}
+
+	l := resp.GetStatus().GetLabels()
+	if l["io.kubernetes.pod.namespace"] == "" {
+		return false
+	}
+	req := int64(0)
+	if shares := resp.GetStatus().GetResources().GetLinux().GetCpuShares(); shares >= 2 {
+		req = shares * 1000 / 1024
+	}
+	r.cache.put(cgroupID, PodID{
+		Namespace:       l["io.kubernetes.pod.namespace"],
+		Pod:             l["io.kubernetes.pod.name"],
+		Container:       l["io.kubernetes.container.name"],
+		PodUID:          l["io.kubernetes.pod.uid"],
+		RequestMilliCPU: req,
+	})
+	return true
 }
 
 // ReadCPUStat reads and parses cpu.stat for a cgroup (issue #6). ok is false when
