@@ -63,6 +63,7 @@ type Offender struct {
 	Intensity   float64 `json:"intensity"`   // percent of CPU consumed (0-100)
 	ReqMilli    int64   `json:"req_milli"`   // CPU request in millicores; -1 = unattributed/system
 	ThrottlePct float64 `json:"throttle"`    // percent of CFS periods throttled this interval (0 = none/no quota)
+	CorrelPct   float64 `json:"burst_correlation"` // 0-100 shape-correlation of this pod's bursts with a victim's stalls; -1 = not computed/sparse
 	Confidence  float64 `json:"confidence"`  // 0-1 that this pod is the noisy neighbour; -1 = not attributable
 	Verdict     string  `json:"verdict"`
 }

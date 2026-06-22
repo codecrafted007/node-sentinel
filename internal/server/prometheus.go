@@ -22,6 +22,8 @@ var (
 		"offender pod's on-CPU milliseconds in the last interval", []string{"pod"}, nil)
 	descThrottle = prometheus.NewDesc("sentinel_pod_cpu_throttle_ratio",
 		"offender pod's CFS-throttled period fraction this interval (0-1)", []string{"pod"}, nil)
+	descBurstCorr = prometheus.NewDesc("sentinel_pod_cpu_burst_correlation",
+		"shape-correlation of offender pod's CPU bursts with a victim's run-queue stalls (0-1)", []string{"pod"}, nil)
 	descRunqP99 = prometheus.NewDesc("sentinel_pod_runqueue_p99_microseconds",
 		"victim pod's run-queue p99 latency", []string{"pod"}, nil)
 	descRunqP50 = prometheus.NewDesc("sentinel_pod_runqueue_p50_microseconds",
@@ -60,6 +62,7 @@ func (c *collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descIntensity
 	ch <- descCPUms
 	ch <- descThrottle
+	ch <- descBurstCorr
 	ch <- descRunqP99
 	ch <- descRunqP50
 	ch <- descMaxConfidence
@@ -95,6 +98,9 @@ func (c *collector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(descIntensity, prometheus.GaugeValue, o.Intensity/100, o.Pod)
 		ch <- prometheus.MustNewConstMetric(descCPUms, prometheus.GaugeValue, o.CPUms, o.Pod)
 		ch <- prometheus.MustNewConstMetric(descThrottle, prometheus.GaugeValue, o.ThrottlePct/100, o.Pod)
+		if o.CorrelPct >= 0 {
+			ch <- prometheus.MustNewConstMetric(descBurstCorr, prometheus.GaugeValue, o.CorrelPct/100, o.Pod)
+		}
 		if o.Confidence >= 0 {
 			ch <- prometheus.MustNewConstMetric(descConfidence, prometheus.GaugeValue, o.Confidence, o.Pod)
 		}

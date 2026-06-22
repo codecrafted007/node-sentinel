@@ -27,7 +27,11 @@ Goal: attribute a victim's stalls to the offender that caused them by the *shape
 - `Correlate(offender, victim, cfg)` returns the strongest **positive lagged Pearson** correlation over the (future) sub-interval bucket series. Pearson is scale/offset invariant, so it scores co-movement, not height — "busy ≠ guilty".
 - **Anti-false-positive guards** (issue #5): lag search with offender-precedes-victim causality guard; min-active-bucket gate on *both* series; variance floor (blocks flat-but-loud series); `Confidence()` clamps the anti-correlated half to 0. A gated result is "not attributable", not "innocent".
 - `correlation_test.go`: 11 tests (perfect/scaled correlation, lag detection, busy≠guilty, anti-correlation, activity gate, variance gate, independent-spike rejection, length mismatch, flat-series, variance). **Portable — runs on macOS.** ✅ passing.
-- Defines the bucket-series contract the kernel side (#4) will produce; not yet wired into the agent (awaits #4's drained buckets + #6's throttle deltas).
+
+### Wire the scorer into the agent — issue #5 integration ✅ (host-verified)
+- Each interval the agent pairs every CPU offender's on-CPU bucket series (`CpuNs`) against the CPU victims' run-queue series (`RunqLatNs`) from the drained #4 timeline (shared epoch axis), takes the best lagged correlation, and surfaces it as a `CORREL` column (stdout) + `sentinel_pod_cpu_burst_correlation` (Prometheus).
+- **Folded conservatively:** offender-specific harm = `max(node-wide victimSignal, correlation)`, so a strong shape match raises this pod's harm linkage — but `changed` + `magnitude` still gate via `min`, and correlation is gated to 0 on sparse timelines, so it can only corroborate, never invent an offender ("the anomaly-vs-baseline gate stays on top", per the issue).
+- **Live-verified** on GKE: correlation computes real values from the timeline (14–26% for a near-sustained hog) and nudges confidence (CORREL 25% → confidence ticked up), folding in with zero errors. Correctly stays **low for a steadily-busy pod** (shape-not-magnitude working). NB: a clean "correlation-as-decider" demo needs a genuinely intermittent multi-core workload — busybox background loops survive `timeout`, so a crisp duty cycle was hard to choreograph; the threshold tuning (`ActiveFloor`/`MinActive`) and that demo are follow-ups, not code gaps.
 
 ---
 
