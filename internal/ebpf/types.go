@@ -21,6 +21,26 @@ type CgroupCPUTime struct {
 	OnCpuNs  uint64
 }
 
+// Timeline geometry — must match NUM_BUCKETS / BUCKET_NS in sched_monitor.bpf.c.
+const (
+	TimelineBuckets  = 64          // 64 windows (power of two: the BPF ring is bitmask-indexed)
+	TimelineBucketNs = 100_000_000 // 100ms each → a rolling 6.4s ring
+)
+
+// CgroupTimeline is one cgroup's sub-interval timeline (issue #4), drained and
+// re-aligned from the per-CPU ring each interval. Every slice has length
+// TimelineBuckets and is ordered oldest→newest over a window ending "now", with
+// the SAME epoch axis across all cgroups — so an offender's CpuNs series and a
+// victim's RunqLatNs series (different cgroups) line up bucket-for-bucket and can
+// be fed straight into metrics.Correlate. Empty/stale windows are zero-filled.
+type CgroupTimeline struct {
+	CgroupID  uint64
+	RunqLatNs []uint64 // VICTIM: summed run-queue wait per bucket
+	RunqCount []uint64 // run-queue waits per bucket (activity gate)
+	CpuNs     []uint64 // OFFENDER: on-CPU time per bucket
+	CtxSwitch []uint64 // on-CPU slices per bucket (activity gate)
+}
+
 // CgroupBlkio is the block-I/O latency histogram + throughput for one cgroup
 // over a read interval, after summing the per-CPU copies.
 type CgroupBlkio struct {

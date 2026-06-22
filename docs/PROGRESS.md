@@ -4,6 +4,37 @@ A running record of completed work, newest phase first. Roadmap lives in design 
 
 ---
 
+## Phase 2 — Temporal correlation (in progress)
+
+Goal: attribute a victim's stalls to the offender that caused them by the *shape* of bursts over sub-interval time, not magnitude (milestone "Temporal correlation (v0.2)", issues #2–#7).
+
+### Sub-interval time-bucketed histograms (`sched_monitor.bpf.c` + reader) — issue #4 ✅ (host-verified, all 5 GKE nodes)
+- Extended the sched observer (no new probes): `sched_switch` now also writes a per-cgroup **ring of 64 × 100ms buckets** (`sched_timeline_map`, `PERCPU_HASH`) — `runq_lat_ns`/`runq_count` (victim) charged to `next`'s bucket, `cpu_ns`/`ctx_switches` (offender) to `prev`'s. Lock-free integers only; all scoring stays in Go.
+- **Epoch-per-bucket lazy reset:** each slot stores the absolute window number it holds; when the ring wraps onto a stale slot the epoch mismatches and it's zeroed before use, so an unaligned drain never mixes two windows (per the design note).
+- **Memory bounded:** `max_entries = MAX_ACTIVE_CGROUPS (512)`, not `MAX_CGROUPS`, so cost (per-CPU × 64 × 32B × entries) stays a few MB instead of ballooning (~3 MB at 4 vCPU).
+- **`ReadTimeline()`** (`internal/ebpf/sched.go`): read-and-delete drain that re-aligns the per-CPU copies by epoch onto **one shared axis ending at `now`** (CLOCK_MONOTONIC, matching `bpf_ktime`) — essential because offender and victim are different cgroups and must share a time axis to correlate. Returns `[]CgroupTimeline` (`types.go`), zero-filling empty windows — exactly the aligned `[]float64`-shaped series `metrics.Correlate` consumes.
+- Agent drains the ring each interval (keeps the bounded map clean) and stashes the latest for the scorer; bpf2go `-type` extended for the new structs; `x/sys` promoted to a direct dep for the monotonic clock.
+- **Two host-only bugs the GKE build caught** (macOS can't compile/load eBPF): (1) a 1600-byte `struct sched_buckets` zeroed on the BPF stack blew the 512-byte stack limit → fixed with a zeroed per-CPU `timeline_zero` scratch map as the insert template; (2) a `% NUM_BUCKETS` ring index the verifier couldn't bound (`math between map_value pointer and register with unbounded min value`) → made `NUM_BUCKETS` a power of two (64) and index with a bitmask. Verified live: agent loads + attaches on all 5 nodes (Ubuntu 24.04, kernel 6.8), `ReadTimeline` drains every interval with zero errors.
+
+### cpu.stat nr_throttled as a confidence input (`cgroup/cpustat.go` + agent) — issue #6 ✅ (host-verified)
+- **Portable parser** `internal/cgroup/cpustat.go`: reads cgroup v2 `cpu.stat` (`nr_periods`/`nr_throttled`/`throttled_usec`), with `Sub` (monotonic per-interval delta, clamps counter resets) and `ThrottledFraction` (share of CFS periods throttled). Pure text handling → unit-tested on macOS (4 tests, ✅).
+- **Resolver** now records each cgroup's dir during the scan and exposes `ReadCPUStat(cgroupID)` (plain cgroupfs read, no probe).
+- **Agent** tracks last interval's `cpu.stat` per offender cgroup, computes the throttle delta, surfaces it as a `THROTTLE` column (stdout) + `sentinel_pod_cpu_throttle_ratio` (Prometheus), and folds it into offender confidence: throttle **stands in for the CHANGED signal** via `max(changed, throttle)`, so it corroborates a spike and works before the learned baseline is warm; magnitude + harm still gate via `min`.
+- **Live-validated** on the GKE node: an *unlimited* hog (53.8% CPU, no throttle) scored **0%** confidence — efficiently busy, its load is its own normal — while a *quota-capped* hog (25.2% CPU, throttled 100% of periods) scored **100%**. Throttle correctly promoted the disruptively-bursty pod over the higher-CPU steady one, exactly issue #6's intent. No errors.
+
+### Lagged correlation scorer (`internal/metrics/correlation.go`) — issue #5 ✅
+- Pure-Go, unit-tested on any platform (mirrors `histogram.go`), ported from `docs/sim/temporal-correlation.html` (sim #2). The kernel only accumulates integers; all floating-point scoring stays here, hot-swappable.
+- `Correlate(offender, victim, cfg)` returns the strongest **positive lagged Pearson** correlation over the (future) sub-interval bucket series. Pearson is scale/offset invariant, so it scores co-movement, not height — "busy ≠ guilty".
+- **Anti-false-positive guards** (issue #5): lag search with offender-precedes-victim causality guard; min-active-bucket gate on *both* series; variance floor (blocks flat-but-loud series); `Confidence()` clamps the anti-correlated half to 0. A gated result is "not attributable", not "innocent".
+- `correlation_test.go`: 11 tests (perfect/scaled correlation, lag detection, busy≠guilty, anti-correlation, activity gate, variance gate, independent-spike rejection, length mismatch, flat-series, variance). **Portable — runs on macOS.** ✅ passing.
+
+### Wire the scorer into the agent — issue #5 integration ✅ (host-verified)
+- Each interval the agent pairs every CPU offender's on-CPU bucket series (`CpuNs`) against the CPU victims' run-queue series (`RunqLatNs`) from the drained #4 timeline (shared epoch axis), takes the best lagged correlation, and surfaces it as a `CORREL` column (stdout) + `sentinel_pod_cpu_burst_correlation` (Prometheus).
+- **Folded conservatively:** offender-specific harm = `max(node-wide victimSignal, correlation)`, so a strong shape match raises this pod's harm linkage — but `changed` + `magnitude` still gate via `min`, and correlation is gated to 0 on sparse timelines, so it can only corroborate, never invent an offender ("the anomaly-vs-baseline gate stays on top", per the issue).
+- **Live-verified** on GKE: correlation computes real values from the timeline (14–26% for a near-sustained hog) and nudges confidence (CORREL 25% → confidence ticked up), folding in with zero errors. Correctly stays **low for a steadily-busy pod** (shape-not-magnitude working). NB: a clean "correlation-as-decider" demo needs a genuinely intermittent multi-core workload — busybox background loops survive `timeout`, so a crisp duty cycle was hard to choreograph; the threshold tuning (`ActiveFloor`/`MinActive`) and that demo are follow-ups, not code gaps.
+
+---
+
 ## Phase 1 — Foundation (in progress)
 
 Goal: prove kernel→Go run-queue-latency attribution with a standalone agent (design §23 Phase 1).

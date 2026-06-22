@@ -27,6 +27,8 @@ type Agent struct {
 	blkio       *ebpf.BlkioObserver
 	net         *ebpf.NetObserver
 	resolver    *cgroup.Resolver
+	timeline    []ebpf.CgroupTimeline      // latest sub-interval ring (issue #4); scored by issue #5 next
+	prevThrottle map[uint64]cgroup.CPUStat // last interval's cpu.stat per offender cgroup, for throttle deltas (issue #6)
 	baseline    *metrics.Baseline // run-queue latency normals (victim side)
 	ioBaseline  *metrics.Baseline // I/O latency normals (victim side)
 	netBaseline *metrics.Baseline // retransmit normals (victim side)
@@ -39,7 +41,8 @@ type Agent struct {
 // New constructs an Agent with the given config.
 func New(cfg Config) *Agent {
 	return &Agent{
-		cfg:         cfg,
+		cfg:          cfg,
+		prevThrottle: map[uint64]cgroup.CPUStat{},
 		baseline:    metrics.NewBaseline(cfg.BaselineAlpha, cfg.BaselineWarmup),
 		ioBaseline:  metrics.NewBaseline(cfg.BaselineAlpha, cfg.BaselineWarmup),
 		netBaseline: metrics.NewBaseline(cfg.BaselineAlpha, cfg.BaselineWarmup),
@@ -148,6 +151,12 @@ func (a *Agent) report() error {
 	if err != nil {
 		return err
 	}
+	// Drain the sub-interval ring every interval to keep the bounded map clean
+	// (read-and-delete). The correlation scorer (issue #5) consumes this next;
+	// for now we just stash the latest so the map never fills.
+	if tl, err := a.sched.ReadTimeline(); err == nil {
+		a.timeline = tl
+	}
 	var blkio []ebpf.CgroupBlkio
 	if a.blkio != nil {
 		if io, err := a.blkio.Read(); err == nil {
@@ -212,7 +221,7 @@ func (a *Agent) buildSnapshot(cpu []ebpf.CgroupCPUTime, runq []ebpf.CgroupLatenc
 		NetMaxConfidence: -1,
 	}
 
-	cpuVictims, cpuWorst := a.cpuVictims(runq)
+	cpuVictims, cpuWorst, cpuVictimIDs := a.cpuVictims(runq)
 	ioVictims, ioWorst := a.ioVictims(blkio)
 	netVictims, netWorst := a.netVictims(network)
 
@@ -230,7 +239,7 @@ func (a *Agent) buildSnapshot(cpu []ebpf.CgroupCPUTime, runq []ebpf.CgroupLatenc
 	}
 
 	if len(cpuVictims) > 0 {
-		snap.Offenders = a.cpuOffenders(cpu, signalFromRatio(cpuWorst), &snap.MaxConfidence)
+		snap.Offenders = a.cpuOffenders(cpu, signalFromRatio(cpuWorst), cpuVictimIDs, &snap.MaxConfidence)
 		snap.Victims = cpuVictims
 	}
 	if len(ioVictims) > 0 {
@@ -264,10 +273,12 @@ func (a *Agent) judgeVictim(baseline *metrics.Baseline, floor float64, cg uint64
 	return isVictim, deg
 }
 
-// cpuVictims: pods starved of CPU (high run-queue latency).
-func (a *Agent) cpuVictims(runq []ebpf.CgroupLatency) ([]report.Victim, float64) {
+// cpuVictims: pods starved of CPU (high run-queue latency). Also returns the
+// victim cgroup IDs so offender attribution can correlate against their stalls.
+func (a *Agent) cpuVictims(runq []ebpf.CgroupLatency) ([]report.Victim, float64, []uint64) {
 	floor := float64(a.cfg.RunqWarn.Microseconds())
 	var out []report.Victim
+	var ids []uint64
 	worst := 0.0
 
 	for _, r := range runq {
@@ -280,6 +291,7 @@ func (a *Agent) cpuVictims(runq []ebpf.CgroupLatency) ([]report.Victim, float64)
 			if deg > worst {
 				worst = deg
 			}
+			ids = append(ids, r.CgroupID)
 			out = append(out, report.Victim{
 				Pod: a.label(r.CgroupID), P50us: metrics.Percentile(r.Slots, 50),
 				P99us: p99, Degradation: deg, Events: r.Count,
@@ -288,7 +300,7 @@ func (a *Agent) cpuVictims(runq []ebpf.CgroupLatency) ([]report.Victim, float64)
 	}
 	a.baseline.Prune()
 	sort.Slice(out, func(i, j int) bool { return out[i].P99us > out[j].P99us })
-	return capVictims(out, a.cfg.TopN), worst
+	return capVictims(out, a.cfg.TopN), worst, ids
 }
 
 // ioVictims: pods waiting on the disk (high I/O latency).
@@ -358,6 +370,57 @@ func capVictims(v []report.Victim, n int) []report.Victim {
 	return v
 }
 
+// correlationConfig tunes the offender↔victim timeline correlation (issue #5),
+// for run-queue / on-CPU series in nanoseconds over the 64×100ms ring.
+var correlationConfig = metrics.CorrelationConfig{
+	MaxLag:      3,         // the offender may lead the victim by up to 300ms
+	MinActive:   5,         // need ≥5 active buckets on BOTH sides before trusting r
+	ActiveFloor: 1_000_000, // a bucket counts as active above ~1ms (ns)
+}
+
+// timelineByCgroup indexes the drained sub-interval ring by cgroup for lookup.
+func timelineByCgroup(tl []ebpf.CgroupTimeline) map[uint64]ebpf.CgroupTimeline {
+	m := make(map[uint64]ebpf.CgroupTimeline, len(tl))
+	for _, t := range tl {
+		m[t.CgroupID] = t
+	}
+	return m
+}
+
+// burstCorrelation returns the strongest shape-correlation (0–1) between this CPU
+// offender's on-CPU bursts and any CPU victim's run-queue stalls over the
+// sub-interval timeline, plus the lag at which it was found (issue #5). It is
+// offender-specific evidence that THIS pod's bursts line up with real stalls —
+// by shape, not size — so a steadily-busy pod doesn't score. Returns 0 when the
+// timeline is too sparse to judge (the scorer's activity gate).
+func (a *Agent) burstCorrelation(tl map[uint64]ebpf.CgroupTimeline, offender uint64, victims []uint64) (float64, int) {
+	off, ok := tl[offender]
+	if !ok {
+		return 0, 0
+	}
+	offCPU := toFloat(off.CpuNs)
+	best, bestLag := 0.0, 0
+	for _, v := range victims {
+		vt, ok := tl[v]
+		if !ok {
+			continue
+		}
+		res := metrics.Correlate(offCPU, toFloat(vt.RunqLatNs), correlationConfig)
+		if c := res.Confidence(); c > best {
+			best, bestLag = c, res.Lag
+		}
+	}
+	return best, bestLag
+}
+
+func toFloat(u []uint64) []float64 {
+	f := make([]float64, len(u))
+	for i, v := range u {
+		f[i] = float64(v)
+	}
+	return f
+}
+
 // signalFromRatio maps a worst-victim degradation ratio to a 0-1 severity used
 // to cap offender confidence. With no warm victim we only have the absolute
 // signal, so use a moderate default rather than overclaiming.
@@ -369,7 +432,7 @@ func signalFromRatio(worst float64) float64 {
 }
 
 // cpuOffenders ranks cgroups by CPU time and scores confidence vs fair share.
-func (a *Agent) cpuOffenders(cpu []ebpf.CgroupCPUTime, victimSignal float64, maxConf *float64) []report.Offender {
+func (a *Agent) cpuOffenders(cpu []ebpf.CgroupCPUTime, victimSignal float64, victimIDs []uint64, maxConf *float64) []report.Offender {
 	var totalNs uint64
 	var totalReq int64
 	for _, r := range cpu {
@@ -384,7 +447,9 @@ func (a *Agent) cpuOffenders(cpu []ebpf.CgroupCPUTime, victimSignal float64, max
 		cpu = cpu[:a.cfg.TopN]
 	}
 
+	tl := timelineByCgroup(a.timeline)
 	out := make([]report.Offender, 0, len(cpu))
+	newThrottle := make(map[uint64]cgroup.CPUStat, len(cpu))
 	for _, r := range cpu {
 		intensity := 0.0
 		if totalNs > 0 {
@@ -392,12 +457,23 @@ func (a *Agent) cpuOffenders(cpu []ebpf.CgroupCPUTime, victimSignal float64, max
 		}
 		o := report.Offender{
 			Pod: a.label(r.CgroupID), CPUms: float64(r.OnCpuNs) / 1e6,
-			Intensity: intensity, ReqMilli: -1, Confidence: -1,
+			Intensity: intensity, ReqMilli: -1, Confidence: -1, CorrelPct: -1,
 			Verdict: "system / unattributed",
 		}
 		if pod, ok := a.resolve(r.CgroupID); ok {
 			o.ReqMilli = pod.RequestMilliCPU
 			o.Verdict = fairShareVerdict(intensity, pod.RequestMilliCPU, totalReq)
+			// CFS throttle pressure this interval (issue #6): fraction of periods
+			// the pod hit its quota, from the cpu.stat delta vs last interval.
+			// First sight (no prev) seeds the baseline and reads as 0.
+			throttle := a.throttleFraction(r.CgroupID, newThrottle)
+			o.ThrottlePct = throttle * 100
+			// Burst correlation (issue #5): does THIS pod's on-CPU burst shape
+			// track a victim's run-queue stalls over the sub-interval timeline?
+			// Offender-specific harm linkage — gated to 0 when the timeline is
+			// sparse, so it can only ever corroborate, never invent harm.
+			corr, _ := a.burstCorrelation(tl, r.CgroupID, victimIDs)
+			o.CorrelPct = corr * 100
 			// Warmup fallback (before the usage baseline is warm): excess over
 			// the pod's CPU request — available instantly from the request, no
 			// learning needed. Once warm, deviation-from-own-normal takes over.
@@ -406,14 +482,40 @@ func (a *Agent) cpuOffenders(cpu []ebpf.CgroupCPUTime, victimSignal float64, max
 				fair := float64(pod.RequestMilliCPU) / float64(totalReq) * 100
 				fallback = clamp((intensity-fair)/100/0.5, 0, 1)
 			}
-			o.Confidence = a.offenderConfidence(a.cpuUsage, r.CgroupID, float64(r.OnCpuNs), intensity, victimSignal, fallback)
+			// A strong shape match raises this offender's harm linkage above the
+			// node-wide victim signal — but magnitude + changed still gate (min),
+			// so correlation corroborates, it can't carry a pod on its own.
+			harm := max(victimSignal, corr)
+			o.Confidence = a.offenderConfidence(a.cpuUsage, r.CgroupID, float64(r.OnCpuNs), intensity, harm, fallback, throttle)
 			if o.Confidence > *maxConf {
 				*maxConf = o.Confidence
 			}
 		}
 		out = append(out, o)
 	}
+	// Keep only cgroups read this interval as next round's baseline — bounds the
+	// map to the offender set and drops departed cgroups.
+	a.prevThrottle = newThrottle
 	return out
+}
+
+// throttleFraction reads a cgroup's cpu.stat, records it in cur for next round,
+// and returns the fraction of CFS periods throttled since last interval (0 on
+// first sight, on a counter reset, or when the cgroup has no CPU quota).
+func (a *Agent) throttleFraction(cgroupID uint64, cur map[uint64]cgroup.CPUStat) float64 {
+	if a.resolver == nil {
+		return 0
+	}
+	now, ok := a.resolver.ReadCPUStat(cgroupID)
+	if !ok {
+		return 0
+	}
+	cur[cgroupID] = now
+	prev, had := a.prevThrottle[cgroupID]
+	if !had {
+		return 0
+	}
+	return now.Sub(prev).ThrottledFraction()
 }
 
 // ioOffenders ranks cgroups by disk throughput; confidence from share of bytes.
@@ -434,7 +536,7 @@ func (a *Agent) ioOffenders(blkio []ebpf.CgroupBlkio, victimSignal float64, maxC
 			SharePct: share(r.Bytes, total), Ops: r.Count, Confidence: -1,
 		}
 		if _, ok := a.resolve(r.CgroupID); ok {
-			o.Confidence = a.offenderConfidence(a.ioUsage, r.CgroupID, float64(r.Bytes), o.SharePct, victimSignal, -1)
+			o.Confidence = a.offenderConfidence(a.ioUsage, r.CgroupID, float64(r.Bytes), o.SharePct, victimSignal, -1, 0)
 			if o.Confidence > *maxConf {
 				*maxConf = o.Confidence
 			}
@@ -462,7 +564,7 @@ func (a *Agent) netOffenders(network []ebpf.CgroupNet, victimSignal float64, max
 			SharePct: share(r.TxBytes, total), Segs: r.TxSegs, Confidence: -1,
 		}
 		if _, ok := a.resolve(r.CgroupID); ok {
-			o.Confidence = a.offenderConfidence(a.netUsage, r.CgroupID, float64(r.TxBytes), o.SharePct, victimSignal, -1)
+			o.Confidence = a.offenderConfidence(a.netUsage, r.CgroupID, float64(r.TxBytes), o.SharePct, victimSignal, -1, 0)
 			if o.Confidence > *maxConf {
 				*maxConf = o.Confidence
 			}
@@ -517,14 +619,24 @@ func (a *Agent) observeUsage(b *metrics.Baseline, cg uint64, usage float64) {
 //   - it's BIG ENOUGH: it holds a meaningful share of the resource, so a tiny
 //     pod jumping from near-zero to near-zero can't read as the culprit.
 //   - there is real HARM: victims are actually degraded (victimSignal).
-func (a *Agent) offenderConfidence(b *metrics.Baseline, cg uint64, usage, sharePct, victimSignal, fallback float64) float64 {
+//
+// throttle (issue #6, CPU only; 0 elsewhere) is CFS-throttle pressure in [0,1] —
+// the fraction of periods the pod hit its quota this interval. Throttling is
+// direct evidence a pod is backing up the scheduler, so it stands in for the
+// CHANGED signal (via max): it corroborates a spike, and works even before the
+// learned baseline is warm. Magnitude and harm still gate via min.
+func (a *Agent) offenderConfidence(b *metrics.Baseline, cg uint64, usage, sharePct, victimSignal, fallback, throttle float64) float64 {
 	magnitude := clamp(sharePct/100/0.25, 0, 1) // 25% of the resource → full
 
 	changed := fallback
 	if ratio, ready := b.Deviation(cg, usage); ready {
 		changed = clamp((ratio-1)/4, 0, 1) // 5x its own normal → full
-	} else if fallback < 0 {
-		return -1 // cold baseline, no fallback — honestly cannot attribute yet
+	}
+	if throttle > 0 {
+		changed = max(changed, clamp(throttle, 0, 1)) // throttling stands in for deviation
+	}
+	if changed < 0 {
+		return -1 // cold baseline, no fallback, no throttle — honestly cannot attribute yet
 	}
 
 	return clamp(min(min(changed, magnitude), victimSignal), 0, 1)
@@ -560,10 +672,10 @@ func (a *Agent) printSnapshot(s report.Snapshot) {
 	if len(s.Victims) > 0 {
 		fmt.Printf("  ── CPU ──  %s\n", attribution(s.MaxConfidence, s.ConfidenceMin))
 		fmt.Printf("  OFFENDERS — by CPU time\n")
-		fmt.Printf("  %-42s %9s %9s %7s %10s  %s\n", "POD", "CPU_MS", "INTENSITY", "REQ_m", "CONFIDENCE", "VERDICT")
+		fmt.Printf("  %-42s %9s %9s %7s %8s %7s %10s  %s\n", "POD", "CPU_MS", "INTENSITY", "REQ_m", "THROTTLE", "CORREL", "CONFIDENCE", "VERDICT")
 		for _, o := range s.Offenders {
-			fmt.Printf("  %-42s %9.0f %8.1f%% %7s %10s  %s\n",
-				truncate(o.Pod, 42), o.CPUms, o.Intensity, reqStr(o.ReqMilli), confStr(o.Confidence), o.Verdict)
+			fmt.Printf("  %-42s %9.0f %8.1f%% %7s %8s %7s %10s  %s\n",
+				truncate(o.Pod, 42), o.CPUms, o.Intensity, reqStr(o.ReqMilli), throtStr(o.ThrottlePct), correlStr(o.CorrelPct), confStr(o.Confidence), o.Verdict)
 		}
 		a.printLatencyVictims("run-queue latency", s.Victims)
 	}
@@ -654,6 +766,20 @@ func degStr(r float64) string {
 		return "—"
 	}
 	return fmt.Sprintf("%.1fx", r)
+}
+
+func throtStr(p float64) string {
+	if p <= 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%.0f%%", p)
+}
+
+func correlStr(p float64) string {
+	if p < 0 {
+		return "—" // not computed (system cgroup) or timeline too sparse
+	}
+	return fmt.Sprintf("%.0f%%", p)
 }
 
 func truncate(s string, n int) string {
