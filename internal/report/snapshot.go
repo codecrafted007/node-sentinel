@@ -58,12 +58,13 @@ type IOOffender struct {
 
 // Offender is a cgroup ranked by CPU time, judged against its fair share.
 type Offender struct {
-	Pod        string  `json:"pod"`
-	CPUms      float64 `json:"cpu_ms"`
-	Intensity  float64 `json:"intensity"`  // percent of CPU consumed (0-100)
-	ReqMilli   int64   `json:"req_milli"`  // CPU request in millicores; -1 = unattributed/system
-	Confidence float64 `json:"confidence"` // 0-1 that this pod is the noisy neighbour; -1 = not attributable
-	Verdict    string  `json:"verdict"`
+	Pod         string  `json:"pod"`
+	CPUms       float64 `json:"cpu_ms"`
+	Intensity   float64 `json:"intensity"`   // percent of CPU consumed (0-100)
+	ReqMilli    int64   `json:"req_milli"`   // CPU request in millicores; -1 = unattributed/system
+	ThrottlePct float64 `json:"throttle"`    // percent of CFS periods throttled this interval (0 = none/no quota)
+	Confidence  float64 `json:"confidence"`  // 0-1 that this pod is the noisy neighbour; -1 = not attributable
+	Verdict     string  `json:"verdict"`
 }
 
 // Victim is a pod waiting on the run queue (high run-queue latency).

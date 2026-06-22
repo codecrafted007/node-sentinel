@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sync"
@@ -65,6 +66,15 @@ type Resolver struct {
 
 	mu    sync.RWMutex
 	cache map[uint64]PodID
+	paths map[uint64]string // cgroup_id -> cgroup dir, for per-interval cpu.stat reads
+}
+
+// cgroupScope is a container's cgroup directory found during a scan: its inode
+// (which equals the cgroup_id eBPF reports) and the directory path, kept so
+// per-interval reads like cpu.stat (issue #6) can find the file.
+type cgroupScope struct {
+	ino uint64
+	dir string
 }
 
 // NewResolver dials the CRI socket and performs an initial scan.
@@ -78,6 +88,7 @@ func NewResolver(criSocket, cgroupRoot string) (*Resolver, error) {
 		conn:       conn,
 		rt:         runtimeapi.NewRuntimeServiceClient(conn),
 		cache:      map[uint64]PodID{},
+		paths:      map[uint64]string{},
 	}
 	if err := r.Refresh(context.Background()); err != nil {
 		_ = conn.Close()
@@ -109,7 +120,7 @@ func (r *Resolver) Refresh(ctx context.Context) error {
 	r.refreshMu.Lock()
 	defer r.refreshMu.Unlock()
 
-	cidToCgroupID, err := r.scanCgroups()
+	cidToScope, err := r.scanCgroups()
 	if err != nil {
 		return fmt.Errorf("scan cgroups: %w", err)
 	}
@@ -121,26 +132,53 @@ func (r *Resolver) Refresh(ctx context.Context) error {
 		return fmt.Errorf("CRI ListContainers: %w", err)
 	}
 
-	next := make(map[uint64]PodID, len(cidToCgroupID))
+	next := make(map[uint64]PodID, len(cidToScope))
+	nextPaths := make(map[uint64]string, len(cidToScope))
 	for _, c := range resp.GetContainers() {
-		cgid, ok := cidToCgroupID[c.GetId()]
+		sc, ok := cidToScope[c.GetId()]
 		if !ok {
 			continue
 		}
 		l := c.GetLabels()
-		next[cgid] = PodID{
+		next[sc.ino] = PodID{
 			Namespace:       l["io.kubernetes.pod.namespace"],
 			Pod:             l["io.kubernetes.pod.name"],
 			Container:       l["io.kubernetes.container.name"],
 			PodUID:          l["io.kubernetes.pod.uid"],
 			RequestMilliCPU: r.requestMilliCPU(ctx, c.GetId()),
 		}
+		nextPaths[sc.ino] = sc.dir
 	}
 
 	r.mu.Lock()
 	r.cache = next
+	r.paths = nextPaths
 	r.mu.Unlock()
 	return nil
+}
+
+// ReadCPUStat reads and parses cpu.stat for a cgroup (issue #6). ok is false when
+// the cgroup isn't resolved or the file can't be read; a cgroup with no CPU quota
+// still reads fine (all-zero throttling), so ok=false means truly unavailable.
+func (r *Resolver) ReadCPUStat(cgroupID uint64) (CPUStat, bool) {
+	r.mu.RLock()
+	dir, ok := r.paths[cgroupID]
+	r.mu.RUnlock()
+	if !ok {
+		return CPUStat{}, false
+	}
+
+	f, err := os.Open(filepath.Join(dir, "cpu.stat"))
+	if err != nil {
+		return CPUStat{}, false
+	}
+	defer f.Close()
+
+	s, err := parseCPUStat(f)
+	if err != nil {
+		return CPUStat{}, false
+	}
+	return s, true
 }
 
 // requestMilliCPU returns a container's CPU request in millicores, derived from
@@ -165,11 +203,12 @@ func (r *Resolver) requestMilliCPU(ctx context.Context, id string) int64 {
 // Close releases the CRI connection.
 func (r *Resolver) Close() error { return r.conn.Close() }
 
-// scanCgroups walks the cgroup tree and returns containerID -> cgroup_id(inode).
-// On cgroups v2 with 64-bit inodes (kernel 5.5+), the kernfs node id eBPF reads
-// equals the directory inode reported by stat, so this join is exact.
-func (r *Resolver) scanCgroups() (map[string]uint64, error) {
-	out := map[string]uint64{}
+// scanCgroups walks the cgroup tree and returns containerID -> cgroup scope
+// (inode + dir). On cgroups v2 with 64-bit inodes (kernel 5.5+), the kernfs node
+// id eBPF reads equals the directory inode reported by stat, so this join is
+// exact; the dir is kept for per-interval cpu.stat reads.
+func (r *Resolver) scanCgroups() (map[string]cgroupScope, error) {
+	out := map[string]cgroupScope{}
 	err := filepath.WalkDir(r.cgroupRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // skip unreadable entries (races with pod deletion)
@@ -185,7 +224,7 @@ func (r *Resolver) scanCgroups() (map[string]uint64, error) {
 		if err := syscall.Stat(path, &st); err != nil {
 			return nil
 		}
-		out[m[1]] = st.Ino
+		out[m[1]] = cgroupScope{ino: st.Ino, dir: path}
 		return nil
 	})
 	return out, err

@@ -27,7 +27,8 @@ type Agent struct {
 	blkio       *ebpf.BlkioObserver
 	net         *ebpf.NetObserver
 	resolver    *cgroup.Resolver
-	timeline    []ebpf.CgroupTimeline // latest sub-interval ring (issue #4); scored by issue #5 next
+	timeline    []ebpf.CgroupTimeline      // latest sub-interval ring (issue #4); scored by issue #5 next
+	prevThrottle map[uint64]cgroup.CPUStat // last interval's cpu.stat per offender cgroup, for throttle deltas (issue #6)
 	baseline    *metrics.Baseline // run-queue latency normals (victim side)
 	ioBaseline  *metrics.Baseline // I/O latency normals (victim side)
 	netBaseline *metrics.Baseline // retransmit normals (victim side)
@@ -40,7 +41,8 @@ type Agent struct {
 // New constructs an Agent with the given config.
 func New(cfg Config) *Agent {
 	return &Agent{
-		cfg:         cfg,
+		cfg:          cfg,
+		prevThrottle: map[uint64]cgroup.CPUStat{},
 		baseline:    metrics.NewBaseline(cfg.BaselineAlpha, cfg.BaselineWarmup),
 		ioBaseline:  metrics.NewBaseline(cfg.BaselineAlpha, cfg.BaselineWarmup),
 		netBaseline: metrics.NewBaseline(cfg.BaselineAlpha, cfg.BaselineWarmup),
@@ -392,6 +394,7 @@ func (a *Agent) cpuOffenders(cpu []ebpf.CgroupCPUTime, victimSignal float64, max
 	}
 
 	out := make([]report.Offender, 0, len(cpu))
+	newThrottle := make(map[uint64]cgroup.CPUStat, len(cpu))
 	for _, r := range cpu {
 		intensity := 0.0
 		if totalNs > 0 {
@@ -405,6 +408,11 @@ func (a *Agent) cpuOffenders(cpu []ebpf.CgroupCPUTime, victimSignal float64, max
 		if pod, ok := a.resolve(r.CgroupID); ok {
 			o.ReqMilli = pod.RequestMilliCPU
 			o.Verdict = fairShareVerdict(intensity, pod.RequestMilliCPU, totalReq)
+			// CFS throttle pressure this interval (issue #6): fraction of periods
+			// the pod hit its quota, from the cpu.stat delta vs last interval.
+			// First sight (no prev) seeds the baseline and reads as 0.
+			throttle := a.throttleFraction(r.CgroupID, newThrottle)
+			o.ThrottlePct = throttle * 100
 			// Warmup fallback (before the usage baseline is warm): excess over
 			// the pod's CPU request — available instantly from the request, no
 			// learning needed. Once warm, deviation-from-own-normal takes over.
@@ -413,14 +421,36 @@ func (a *Agent) cpuOffenders(cpu []ebpf.CgroupCPUTime, victimSignal float64, max
 				fair := float64(pod.RequestMilliCPU) / float64(totalReq) * 100
 				fallback = clamp((intensity-fair)/100/0.5, 0, 1)
 			}
-			o.Confidence = a.offenderConfidence(a.cpuUsage, r.CgroupID, float64(r.OnCpuNs), intensity, victimSignal, fallback)
+			o.Confidence = a.offenderConfidence(a.cpuUsage, r.CgroupID, float64(r.OnCpuNs), intensity, victimSignal, fallback, throttle)
 			if o.Confidence > *maxConf {
 				*maxConf = o.Confidence
 			}
 		}
 		out = append(out, o)
 	}
+	// Keep only cgroups read this interval as next round's baseline — bounds the
+	// map to the offender set and drops departed cgroups.
+	a.prevThrottle = newThrottle
 	return out
+}
+
+// throttleFraction reads a cgroup's cpu.stat, records it in cur for next round,
+// and returns the fraction of CFS periods throttled since last interval (0 on
+// first sight, on a counter reset, or when the cgroup has no CPU quota).
+func (a *Agent) throttleFraction(cgroupID uint64, cur map[uint64]cgroup.CPUStat) float64 {
+	if a.resolver == nil {
+		return 0
+	}
+	now, ok := a.resolver.ReadCPUStat(cgroupID)
+	if !ok {
+		return 0
+	}
+	cur[cgroupID] = now
+	prev, had := a.prevThrottle[cgroupID]
+	if !had {
+		return 0
+	}
+	return now.Sub(prev).ThrottledFraction()
 }
 
 // ioOffenders ranks cgroups by disk throughput; confidence from share of bytes.
@@ -441,7 +471,7 @@ func (a *Agent) ioOffenders(blkio []ebpf.CgroupBlkio, victimSignal float64, maxC
 			SharePct: share(r.Bytes, total), Ops: r.Count, Confidence: -1,
 		}
 		if _, ok := a.resolve(r.CgroupID); ok {
-			o.Confidence = a.offenderConfidence(a.ioUsage, r.CgroupID, float64(r.Bytes), o.SharePct, victimSignal, -1)
+			o.Confidence = a.offenderConfidence(a.ioUsage, r.CgroupID, float64(r.Bytes), o.SharePct, victimSignal, -1, 0)
 			if o.Confidence > *maxConf {
 				*maxConf = o.Confidence
 			}
@@ -469,7 +499,7 @@ func (a *Agent) netOffenders(network []ebpf.CgroupNet, victimSignal float64, max
 			SharePct: share(r.TxBytes, total), Segs: r.TxSegs, Confidence: -1,
 		}
 		if _, ok := a.resolve(r.CgroupID); ok {
-			o.Confidence = a.offenderConfidence(a.netUsage, r.CgroupID, float64(r.TxBytes), o.SharePct, victimSignal, -1)
+			o.Confidence = a.offenderConfidence(a.netUsage, r.CgroupID, float64(r.TxBytes), o.SharePct, victimSignal, -1, 0)
 			if o.Confidence > *maxConf {
 				*maxConf = o.Confidence
 			}
@@ -524,14 +554,24 @@ func (a *Agent) observeUsage(b *metrics.Baseline, cg uint64, usage float64) {
 //   - it's BIG ENOUGH: it holds a meaningful share of the resource, so a tiny
 //     pod jumping from near-zero to near-zero can't read as the culprit.
 //   - there is real HARM: victims are actually degraded (victimSignal).
-func (a *Agent) offenderConfidence(b *metrics.Baseline, cg uint64, usage, sharePct, victimSignal, fallback float64) float64 {
+//
+// throttle (issue #6, CPU only; 0 elsewhere) is CFS-throttle pressure in [0,1] —
+// the fraction of periods the pod hit its quota this interval. Throttling is
+// direct evidence a pod is backing up the scheduler, so it stands in for the
+// CHANGED signal (via max): it corroborates a spike, and works even before the
+// learned baseline is warm. Magnitude and harm still gate via min.
+func (a *Agent) offenderConfidence(b *metrics.Baseline, cg uint64, usage, sharePct, victimSignal, fallback, throttle float64) float64 {
 	magnitude := clamp(sharePct/100/0.25, 0, 1) // 25% of the resource → full
 
 	changed := fallback
 	if ratio, ready := b.Deviation(cg, usage); ready {
 		changed = clamp((ratio-1)/4, 0, 1) // 5x its own normal → full
-	} else if fallback < 0 {
-		return -1 // cold baseline, no fallback — honestly cannot attribute yet
+	}
+	if throttle > 0 {
+		changed = max(changed, clamp(throttle, 0, 1)) // throttling stands in for deviation
+	}
+	if changed < 0 {
+		return -1 // cold baseline, no fallback, no throttle — honestly cannot attribute yet
 	}
 
 	return clamp(min(min(changed, magnitude), victimSignal), 0, 1)
@@ -567,10 +607,10 @@ func (a *Agent) printSnapshot(s report.Snapshot) {
 	if len(s.Victims) > 0 {
 		fmt.Printf("  ── CPU ──  %s\n", attribution(s.MaxConfidence, s.ConfidenceMin))
 		fmt.Printf("  OFFENDERS — by CPU time\n")
-		fmt.Printf("  %-42s %9s %9s %7s %10s  %s\n", "POD", "CPU_MS", "INTENSITY", "REQ_m", "CONFIDENCE", "VERDICT")
+		fmt.Printf("  %-42s %9s %9s %7s %8s %10s  %s\n", "POD", "CPU_MS", "INTENSITY", "REQ_m", "THROTTLE", "CONFIDENCE", "VERDICT")
 		for _, o := range s.Offenders {
-			fmt.Printf("  %-42s %9.0f %8.1f%% %7s %10s  %s\n",
-				truncate(o.Pod, 42), o.CPUms, o.Intensity, reqStr(o.ReqMilli), confStr(o.Confidence), o.Verdict)
+			fmt.Printf("  %-42s %9.0f %8.1f%% %7s %8s %10s  %s\n",
+				truncate(o.Pod, 42), o.CPUms, o.Intensity, reqStr(o.ReqMilli), throtStr(o.ThrottlePct), confStr(o.Confidence), o.Verdict)
 		}
 		a.printLatencyVictims("run-queue latency", s.Victims)
 	}
@@ -661,6 +701,13 @@ func degStr(r float64) string {
 		return "—"
 	}
 	return fmt.Sprintf("%.1fx", r)
+}
+
+func throtStr(p float64) string {
+	if p <= 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%.0f%%", p)
 }
 
 func truncate(s string, n int) string {
