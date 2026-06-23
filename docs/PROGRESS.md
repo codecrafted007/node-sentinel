@@ -8,6 +8,12 @@ A running record of completed work, newest phase first. Roadmap lives in design 
 
 Goal: close the control loop — the controller stops being observe-only and *acts* on confident offenders, conservatively and visibly (milestone "Temporal correlation (v0.2)", issue #7).
 
+### Network confidence: judge the victim on retransmit *rate*, not raw count — issue #12 ✅ (host-verified)
+- **Root cause:** `netVictims` flagged a cgroup on raw retransmit *count* (`≥ RetransWarn`), so any high-throughput pod (metrics agents, ingress) registered as a "victim" just by sending a lot — inflating `victimSignal`, which (with concentrated TX `magnitude`) carried offenders to a spurious 100%. Surfaced live during #7: dozens of innocent pods got `NoisyNeighborThrottled` Events.
+- **Fix** (`agent.go` `netVictims` + `config.go`): a network victim now must clear three gates — `MinSegs` (enough activity), `RetransWarn` (a meaningful absolute count), **and** `RetransRateWarn` (retransmit *rate* = retransmits/segs, default 1%) — and the baseline now learns each pod's normal *rate*, so we flag a rate that's both genuinely high and unusual *for itself*. A pod at 10 retransmits / 10 000 segs (0.1%) is no longer a victim; one at 20% is.
+- **Live before/after** on the GKE cluster: before, confident net offenders were a broad sweep of innocent busy pods (vmagent, kube-state-metrics, argocd, redis, …); after, they narrowed to pods with genuinely pathological retransmit rates (`qablrupgrd/ingresscfg` at 27–47%), with the innocent high-volume pods dropping to low/no confidence and the gate discriminating within survivors (50% → alert-only, cold-baseline → `—`).
+- New flag `--retrans-rate-warn`; `--retrans-warn` is now the secondary absolute-count gate.
+
 ### Tiered remediation — Event tier + framework (`internal/controller/remediation.go`) — issue #7 ✅ (host-verified)
 - The controller now has a Kubernetes client (`client-go`, in-cluster) and a `Remediator`. **Off by default** — observe-only unless `--remediate`, with `--dry-run` and a per-pod `--cooldown` (default 5m).
 - **Decision engine:** acts only on offenders the per-node confidence model already marked confident (`Confidence >= ConfidenceMin`), across CPU/disk/net; `system(cg:..)`/`unknown` are never acted on (the honest-attribution rule, unit-tested in `splitPod`).
