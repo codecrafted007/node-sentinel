@@ -30,6 +30,7 @@ type nodeState struct {
 // Controller holds the latest report from every node.
 type Controller struct {
 	staleAfter time.Duration
+	remediator *Remediator // nil = observe-only (issue #7)
 
 	mu    sync.RWMutex
 	nodes map[string]*nodeState
@@ -41,8 +42,16 @@ func New(staleAfter time.Duration) *Controller {
 	return &Controller{staleAfter: staleAfter, nodes: map[string]*nodeState{}}
 }
 
-// ingest records a snapshot from a node.
-func (c *Controller) ingest(s report.Snapshot, now time.Time) {
+// WithRemediator enables remediation: each ingested snapshot's confident
+// offenders are acted on (issue #7). Without it the controller is observe-only.
+func (c *Controller) WithRemediator(r *Remediator) *Controller {
+	c.remediator = r
+	return c
+}
+
+// ingest records a snapshot from a node and, if remediation is enabled, acts on
+// its confident offenders.
+func (c *Controller) ingest(ctx context.Context, s report.Snapshot, now time.Time) {
 	name := s.NodeName
 	if name == "" {
 		name = "unknown"
@@ -50,6 +59,10 @@ func (c *Controller) ingest(s report.Snapshot, now time.Time) {
 	c.mu.Lock()
 	c.nodes[name] = &nodeState{Snapshot: s, LastSeen: now}
 	c.mu.Unlock()
+
+	if c.remediator != nil && !s.Healthy {
+		c.remediator.Remediate(ctx, s)
+	}
 }
 
 // Serve runs the HTTP API until ctx is cancelled:
@@ -81,7 +94,7 @@ func (c *Controller) handleReport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad snapshot: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	c.ingest(s, time.Now())
+	c.ingest(r.Context(), s, time.Now())
 	w.WriteHeader(http.StatusNoContent)
 }
 
