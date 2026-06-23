@@ -13,6 +13,11 @@
 > three architecture diagrams in [`ARCHITECTURE.md`](ARCHITECTURE.md); the build
 > mechanics in [`HOW.md`](HOW.md). This document is the long-form union of all of
 > them, traced down to individual struct fields.
+>
+> **§§0–10** are the Phase-1 foundation (detection). **§§11–13** ([Part II](#part-ii--the-layers-added-since-phase-1-v02--v03))
+> are the v0.2 / v0.3 layers built on top: temporal correlation, short-lived-pod
+> attribution, and the first remediation. Read §§0–10 for the core mental model;
+> Part II for everything added since.
 
 Every claim below is tagged ✅ **built** (in the code today) or 🔜 **roadmap**.
 
@@ -32,6 +37,12 @@ Every claim below is tagged ✅ **built** (in the code today) or 🔜 **roadmap*
 9. [End-to-end trace of a single interval](#9-end-to-end-trace-of-a-single-interval)
 10. [Appendix: every tunable, every map, every probe](#10-appendix-every-tunable-every-map-every-probe)
 
+**Part II — the layers added since Phase 1 (v0.2 / v0.3):**
+
+11. [Temporal correlation — pinning the offender by burst shape](#11-temporal-correlation--pinning-the-offender-by-the-shape-of-its-bursts) (#4 ring, #6 throttle, #5 scorer)
+12. [Short-lived pod attribution](#12-short-lived-pod-attribution--never-losing-a-name) (#2 lifecycle ringbuf, #3 TTL cache)
+13. [Remediation — the controller finally acts](#13-remediation--the-controller-finally-acts-7--event-tier) (#7 Event tier)
+
 ---
 
 ## 0. The one-paragraph version
@@ -46,6 +57,13 @@ unusual *for them*?", and if so tries to name the pod responsible — but only
 with a **confidence score**, and only when it can honestly tie the cgroup to a
 real Kubernetes container. It measures *harm*, not just *usage*, and it would
 rather say "can't tell" than blame the wrong pod.
+
+On top of that core (Part II), it also keeps a fine-grained **timeline** so it can
+correlate an offender's bursts with a victim's stalls by *shape* (§11), folds
+**CFS-throttling** into its confidence (§11.5), keeps short-lived containers
+**nameable** via an in-kernel lifecycle watcher + a grace-period cache (§12), and
+— when explicitly enabled — **acts** by emitting a Kubernetes Event on the
+offender (§13).
 
 ```mermaid
 flowchart LR
@@ -103,7 +121,7 @@ pod **with a confidence score**, and is designed to **close the control loop**
 |---|---|---|---|
 | Measures | how much you used | everything, in detail | **how much others *waited*** |
 | Output | graphs | graphs/traces | **a ranked, scored verdict** |
-| Acts? | no | no | **🔜 taint / cordon / evict under a CRD policy** |
+| Acts? | no | no | **✅ emits an Event on the offender, gated by confidence (§13); `/resize` 🔜 — *timeout, not eviction*** |
 
 > **Honesty over coverage.** The single most important design value: a cgroup
 > that can't be tied to a real container is labelled `unknown` and **never
@@ -111,9 +129,11 @@ pod **with a confidence score**, and is designed to **close the control loop**
 > findings are *alert-only*. The system is built to be trusted enough to one day
 > act automatically, which means it must never act on a guess.
 
-**Today (Phase 1, ✅):** the detection half — the per-node agent — is built and
-validated on a live cluster. **Roadmap (🔜):** the controller's decision engine,
-the `NodeHealthPolicy` CRD, and remediation.
+**Built and live-validated (✅):** the detection half (the per-node agent), the
+v0.2 temporal-correlation + short-lived-attribution layers (§§11–12), and the
+first remediation tier — the controller emits Events on confident offenders
+(§13). **Roadmap (🔜):** the in-place `/resize` remediation tier and the
+`NodeHealthPolicy` CRD that will make the policy declarative.
 
 ---
 
@@ -534,10 +554,12 @@ Pods come and go constantly, so the cache must stay current via two mechanisms:
   children. This gives near-instant updates; the periodic rescan remains the
   backstop for any inotify drops.
 
-> 🔜 **Known gap (issue #3):** the rescan rebuilds the *entire* cache each time
-> with no TTL on individual entries — fine at Phase-1 scale, a target for a
-> TTL'd incremental cache later. Note this is a *staleness* concern, **not** a
-> PID-reuse race — the cgroup-keying already designed that away (§4.1).
+> ✅ **Resolved (issue #3, §12.2):** the rescan used to rebuild the *entire* cache
+> each time, dropping a cgroup's name the instant it vanished. It now uses a
+> **TTL'd cache** that keeps a vanished cgroup nameable for a grace period, plus
+> an in-kernel `cgroup_mkdir`/`rmdir` watcher (#2, §12.1) that names containers at
+> birth. Note this was always a *staleness* concern, **not** a PID-reuse race —
+> the cgroup-keying already designed that away (§4.1).
 
 ---
 
@@ -714,7 +736,7 @@ flowchart TB
     off --> conf["confidence =<br/>min(changed, magnitude, victimSignal)"]
     conf --> gate{"conf ≥ 0.7?"}
     gate -->|yes| named["confident pod offender"]
-    gate -->|no| alert["low confidence — ALERT ONLY 🔜 never act"]
+    gate -->|no| alert["low confidence — ALERT ONLY, never acted on"]
     style healthy fill:#cdebd3,stroke:#2f6b38,color:#10240f
     style named fill:#ffe7bf,stroke:#9c7209,color:#3a2a00
     style alert fill:#f8d4d4,stroke:#962f2f,color:#330d0d
@@ -841,13 +863,17 @@ verdict (`attribution`, agent.go:609-618):
 |---|---|---|
 | `< 0` | no attributable pod (cold baseline, or a system process) | **alert only** |
 | `≥ 0` and `< 0.7` | a candidate, but not sure enough | **alert only** |
-| `≥ 0.7` | confident pod offender | named offender (🔜 actionable) |
+| `≥ 0.7` | confident pod offender | named offender (✅ now actionable — §13) |
 
-> **This gate is the whole safety philosophy in one number.** Remediation
-> (🔜 taint/cordon/evict) will only ever fire above it. Everything below is
-> observe-and-alert. The system is engineered so that the cost of a false "can't
-> tell" (a missed alert) is always preferred over a false blame (acting on the
-> wrong pod).
+> **This gate is the whole safety philosophy in one number.** Remediation (§13,
+> Event tier ✅; `/resize` 🔜) only ever fires above it, and *"timeout, not
+> eviction"* — never a blunt evict. Everything below is observe-and-alert. The
+> system is engineered so that the cost of a false "can't tell" (a missed alert)
+> is always preferred over a false blame (acting on the wrong pod).
+>
+> Two later signals (§11) feed this same gate: **CFS throttling** and **burst
+> correlation** give independent ways to satisfy the "disruptive" and "real harm"
+> terms — `confidence = min(max(changed, throttle), magnitude, max(victimSignal, correlation))`.
 
 ### 7.5 The fair-share verdict (human-readable label)
 
@@ -876,7 +902,7 @@ flowchart LR
     snap --> stdout["stdout tables<br/>(printSnapshot)"]
     store --> prom["/metrics<br/>Prometheus collector"]
     store --> ctl["unix socket<br/>sentinelctl top/status"]
-    snap --> ctrl["controller<br/>POST /report 🔜 decides"]
+    snap --> ctrl["controller<br/>POST /report → aggregate ✅<br/>+ remediate (§13) ✅"]
 ```
 
 - **stdout** (`printSnapshot`, agent.go:551-606) — a one-line heartbeat when
@@ -893,7 +919,9 @@ flowchart LR
 - **Controller** (`reportToController`, agent.go:178-198) — best-effort
   `POST /report` JSON. **Best-effort is a feature:** a controller outage must
   never disrupt local detection — the agent is fully self-contained. The
-  controller aggregates today (✅); it decides and acts 🔜.
+  controller aggregates (✅) and, when `--remediate` is set, **acts** on confident
+  offenders by emitting Events (✅ §13). The stdout CPU offender table also now
+  carries `THROTTLE` (§11.5) and `CORREL` (§11.4) columns.
 
 ---
 
@@ -946,7 +974,15 @@ cores on an 8-core node:
    `(6−1)/4 = 1.0`. → **confidence = min(1, 1, 1) = 1.0**.
 5. **Gate:** 1.0 ≥ 0.7 → **confident pod offender: `batch/cruncher`**, verdict
    "OVER fair share." Printed, exported to Prometheus, POSTed to the controller.
-   (🔜 the controller would now consider remediation under policy.)
+   If the controller runs with `--remediate`, it now emits a `NoisyNeighborThrottled`
+   Warning Event on the pod (§13); otherwise it's observe-and-alert.
+
+> **What §11 adds to this trace.** Because `cruncher` *bursts* rather than runs
+> flat, its `CpuNs` timeline (§11.1) and `api`'s `RunqLatNs` timeline rise together
+> — the lagged correlation (§11.3) confirms `api`'s stalls track `cruncher`'s
+> bursts in *shape*, and if `cruncher` is hitting a CPU quota its `THROTTLE` rises
+> too. Both feed the same gate, so the verdict survives even cases where raw
+> magnitude alone would be ambiguous.
 
 Contrast: if `cruncher` were the node's *only* pod, there'd be **no victim** (step
 3 fails) → node stays Healthy → `cruncher` is never blamed despite 75% usage.
@@ -967,19 +1003,27 @@ Contrast: if `cruncher` were the node's *only* pod, there'd be **no victim** (st
 | `blkio_latency_map` | PERCPU_HASH | cgroup_id | `blkio_hist{slots[27], total_us, count, bytes}` | I/O latency + throughput |
 | `inflight_rq` | HASH | `rq` ptr | `rq_start{ts, cgroup_id, bytes}` | in-flight disk requests |
 | `net_stats_map` | PERCPU_HASH | cgroup_id | `net_stats{retransmits, tx_bytes, tx_segs}` | network counters |
+| `sched_timeline_map` ✅ #4 | PERCPU_HASH | cgroup_id | `sched_buckets{ bucket[64] }` (2 KB) | 64×100ms sub-interval ring (correlation) |
+| `timeline_zero` ✅ #4 | PERCPU_ARRAY[1] | 0 | `sched_buckets` | zeroed insert template (BPF stack-limit workaround) |
+| `cgroup_events` ✅ #2 | RINGBUF (256 KB) | — | `cgroup_event{cgroup_id, op, path[256]}` | cgroup mkdir/rmdir lifecycle stream |
 
-`MAX_SLOTS = 27`, `MAX_CGROUPS = 4096`, `MAX_TASKS = MAX_INFLIGHT = 65536`.
+`MAX_SLOTS = 27`, `MAX_CGROUPS = 4096`, `MAX_TASKS = MAX_INFLIGHT = 65536`,
+`NUM_BUCKETS = 64` (power of two — bitmask-indexed), `MAX_ACTIVE_CGROUPS = 512`.
 
 ### 10.2 Probes
 
 | Hook | Type | Program | Records |
 |---|---|---|---|
 | `sched_wakeup` / `sched_wakeup_new` | tp_btf | stamp wakeup time | `wakeup_ts_map[pid] = now` |
-| `sched_switch` | tp_btf | victim + offender | runq latency of `next`; on-CPU time of `prev` |
+| `sched_switch` | tp_btf | victim + offender | runq latency of `next`; on-CPU time of `prev`; **+ both into the 100ms timeline bucket** ✅ #4 |
 | `block_rq_insert` | tp_btf | I/O start | `inflight_rq[rq] = {now, cgroup, bytes}` |
 | `block_rq_complete` | tp_btf | I/O latency | `blkio_latency_map[cg]` |
 | `tcp_retransmit_skb` | tp_btf | net victim | `net_stats_map[cg].retransmits++` |
 | `tcp_sendmsg` | fentry | net offender | `net_stats_map[cg].tx_bytes/segs` |
+| `cgroup_mkdir` / `cgroup_rmdir` | tp_btf | lifecycle ✅ #2 | emit `(cgroup_id, op, path)` to `cgroup_events` ringbuf |
+
+`cpu.stat` throttle (#6) is **not** a probe — it's a plain cgroupfs read of
+`<cgroup>/cpu.stat` per offender each interval.
 
 ### 10.3 Config defaults (`agent/config.go` `DefaultConfig`)
 
@@ -998,8 +1042,14 @@ Contrast: if `cruncher` were the node's *only* pod, there'd be **no victim** (st
 | `BaselineAlpha` | 0.15 | EMA smoothing for learned normal |
 | `BaselineWarmup` | 3 | observations before a baseline is trusted |
 | `ConfidenceThreshold` | 0.7 | confidence to name a pod the offender |
+| `CacheTTL` ✅ #3 | 30 s | grace period a vanished cgroup's name is kept |
 | `MetricsAddr` | `:2112` | Prometheus listen address |
 | `LocalSocket` | `/var/run/sentinel/agent.sock` | sentinelctl socket |
+
+Correlation scorer (#5, `correlationConfig` in `agent.go`): `MaxLag = 3` buckets,
+`MinActive = 5`, `ActiveFloor = 1 ms`. Controller remediation (#7,
+`cmd/controller`): `--remediate` (default **off**), `--dry-run`, `--cooldown`
+(5 m).
 
 ### 10.4 The key equations, collected
 
@@ -1010,28 +1060,360 @@ Contrast: if `cruncher` were the node's *only* pod, there'd be **no victim** (st
 - **deviation:** `ratio = current / baseline`
 - **milliCPU from shares:** `milli = shares · 1000 / 1024`
 - **CPU fair share:** `fair% = reqMilli / Σ reqMilli · 100`
-- **confidence:** `min(changed, magnitude, victimSignal)` where
+- **confidence (Phase 1):** `min(changed, magnitude, victimSignal)` where
   `changed = clamp((ratio−1)/4)`, `magnitude = clamp(share/0.25)`,
   `victimSignal = clamp((worst−1)/4)`
+- **confidence (with §11):** `min(max(changed, throttle), magnitude, max(victimSignal, correlation))`
+- **timeline bucket index (#4):** `idx = epoch & 63`, `epoch = ktime_ns / 100ms`
+- **throttle fraction (#6):** `nr_throttled_delta / nr_periods_delta` ∈ [0,1]
+- **lagged Pearson (#5):** `r(lag)` of offender `CpuNs[i]` vs victim `RunqLatNs[i+lag]`,
+  best over `lag ∈ [0, MaxLag]`; `correlation = clamp(r, 0, 1)` past the activity gate
+- **TTL cache (#3):** keep a vanished entry until `now > lastSeen + CacheTTL`
 
 ### 10.5 Where each concept lives in the tree
 
 | Concept | File |
 |---|---|
-| eBPF programs | `internal/ebpf/bpf/{sched,blkio,net}_monitor.bpf.c` |
+| eBPF programs | `internal/ebpf/bpf/{sched,blkio,net,cgroup}_monitor.bpf.c` |
 | committed CO-RE header | `internal/ebpf/bpf/vmlinux.h` |
-| load + attach | `internal/ebpf/{loader,blkio,net}.go` |
-| read-and-delete | `internal/ebpf/{sched,blkio,net}.go` |
-| Go map types | `internal/ebpf/types.go` |
+| load + attach | `internal/ebpf/{loader,blkio,net,cgroup}.go` |
+| read-and-delete + timeline drain (#4) | `internal/ebpf/{sched,blkio,net}.go` |
+| Go map types (incl. `CgroupTimeline`) | `internal/ebpf/types.go` |
 | percentiles | `internal/metrics/histogram.go` |
 | learned baseline (EMA) | `internal/metrics/baseline.go` |
-| cgroup→pod resolver | `internal/cgroup/resolver.go` |
+| lagged correlation scorer (#5) | `internal/metrics/correlation.go` |
+| cgroup→pod resolver + `cpu.stat` read (#6) | `internal/cgroup/{resolver,cpustat}.go` |
+| TTL cache (#3) + portable `PodID` | `internal/cgroup/{ttlcache,podid}.go` |
 | inotify watcher | `internal/cgroup/watcher.go` |
-| decision model (victims, offenders, confidence) | `internal/agent/agent.go` |
+| decision model (victims, offenders, confidence, throttle, correlation) | `internal/agent/agent.go` |
 | config / tunables | `internal/agent/config.go` |
 | snapshot struct | `internal/report/snapshot.go` |
 | Prometheus / socket / store | `internal/server/*` |
+| controller aggregate + remediation (#7) | `internal/controller/{controller,remediation}.go` |
 | entrypoints | `cmd/{agent,controller,sentinelctl}/main.go` |
+
+---
+
+# Part II — the layers added since Phase 1 (v0.2 / v0.3)
+
+§§0–10 are the Phase-1 foundation: capture contention, judge it, name the
+offender. The sections below are what we built on top — they reuse the same
+machinery (per-cgroup maps, the EMA baseline, the confidence gate) and slot into
+the same once-per-interval flow.
+
+```mermaid
+flowchart TB
+    base["Phase 1 (§§0–10)<br/>capture → percentiles → victim/offender → confidence gate"]
+    base --> tc["§11 Temporal correlation<br/>timeline ring (#4) · throttle (#6) · correlation (#5)<br/>— sharpen WHO and HOW SURE"]
+    base --> sl["§12 Short-lived attribution<br/>lifecycle ringbuf (#2) · TTL cache (#3)<br/>— never lose a name"]
+    tc --> rem["§13 Remediation (#7)<br/>controller ACTS — Event tier"]
+    sl --> rem
+    style base fill:#cdebd3,stroke:#2f6b38,color:#10240f
+    style tc fill:#cdebd3,stroke:#2f6b38,color:#10240f
+    style sl fill:#cdebd3,stroke:#2f6b38,color:#10240f
+    style rem fill:#ffe7bf,stroke:#9c7209,color:#3a2a00
+```
+
+---
+
+## 11. Temporal correlation — pinning the offender by the *shape* of its bursts
+
+Phase 1 attributes by **magnitude** (who used the most) gated by harm. That misses
+a class of culprit: a pod that saturates the run-queue in short **bursts** at a
+modest *average*. Averaged over a 5 s scrape, a 200 ms spike vanishes — but its
+blast radius shows in victims' tail latency. The v0.2 work adds a fine-grained
+**time** dimension so the agent can ask a sharper question: *does this offender's
+burst shape track that victim's stall shape?* Three pieces compose:
+
+```mermaid
+flowchart LR
+    R["#4 timeline ring<br/>64×100ms per cgroup<br/>(kernel)"] --> D["ReadTimeline<br/>drain + align<br/>to one time axis"]
+    D --> S["#5 lagged Pearson<br/>offender CpuNs vs<br/>victim RunqLatNs"]
+    T["#6 cpu.stat throttle<br/>CFS quota pressure"] --> C["confidence fold<br/>min(changed', magnitude, harm')"]
+    S --> C
+    style R fill:#cdebd3,stroke:#2f6b38,color:#10240f
+    style D fill:#cdebd3,stroke:#2f6b38,color:#10240f
+    style S fill:#cdebd3,stroke:#2f6b38,color:#10240f
+    style T fill:#cdebd3,stroke:#2f6b38,color:#10240f
+    style C fill:#cdebd3,stroke:#2f6b38,color:#10240f
+```
+
+### 11.1 The sub-interval ring (#4) ✅
+
+The CPU observer already fires on every `sched_switch`. We add a **second**
+write there: a per-cgroup ring of **64 buckets of 100 ms** (a rolling 6.4 s
+timeline) in a new `PERCPU_HASH`, `sched_timeline_map`
+(`sched_monitor.bpf.c`). Each bucket holds both halves of the story for one 100 ms
+window:
+
+```c
+struct sched_bucket {
+    __u64 epoch;        // absolute window number (ktime / 100ms) this slot holds
+    __u64 runq_lat_ns;  // VICTIM: summed run-queue wait in this window
+    __u64 cpu_ns;       // OFFENDER: on-CPU time charged in this window
+    __u32 runq_count;   // activity-gate input
+    __u32 ctx_switches; // activity-gate input
+};
+struct sched_buckets { struct sched_bucket b[64]; };  // one cgroup's last 6.4 s
+```
+
+Two design points the **live build forced** (a verifier/compiler reject we could
+only see on the cluster, never on macOS):
+
+1. **Power-of-two index.** The ring slot is `idx = epoch & (NUM_BUCKETS-1)`, a
+   *bitmask*. A plain `epoch % 64` leaves the index unbounded as far as the
+   verifier can prove (`math between map_value pointer and register with
+   unbounded min value`), and it rejects the array access. The mask makes the
+   `0..63` bound provable.
+2. **No big struct on the BPF stack.** `struct sched_buckets` is 2 KB — far over
+   the 512-byte BPF stack limit — so a new map entry can't be zeroed on the
+   stack. A zeroed per-CPU `timeline_zero` array serves as the insert template.
+
+**Epoch-per-bucket lazy reset** is what lets one fixed ring represent a *sliding*
+window: each slot records which absolute window it currently holds. When the ring
+wraps onto a slot from a previous revolution, the epoch mismatches and the slot is
+zeroed before use — so an unaligned drain never mixes two windows' counts.
+
+Memory is bounded on purpose: `max_entries = MAX_ACTIVE_CGROUPS (512)`, not 4096,
+so cost (`per-CPU × 64 × 32 B × entries`) stays a few MB even on high-core nodes.
+
+### 11.2 Draining onto one shared time axis (`ReadTimeline`) ✅
+
+The drain (`sched.go`, read-and-delete like every other map) does something the
+histogram reads don't: it **re-aligns** the per-CPU copies onto a *single* time
+axis. Why this matters is the crux of the whole feature — **the offender and the
+victim are different cgroups**, so their two series must be plotted against the
+*same* clock to be comparable.
+
+- Read `CLOCK_MONOTONIC` once (the same clock `bpf_ktime_get_ns` stamps with);
+  `refEpoch = now / 100ms` is the right edge of every cgroup's window.
+- For each cgroup, fold its per-CPU bucket copies by **absolute epoch** (a slot
+  can hold different windows on different CPUs, so we can't sum slot *i* blindly):
+  `age = refEpoch − bucket.epoch`, `pos = 63 − age`; drop anything older than the
+  ring or ahead of now. Zero-fill empty windows.
+
+The result is `[]CgroupTimeline{ RunqLatNs[64], CpuNs[64], … }` — exactly the
+aligned, equal-length `[]float64`-shaped series the scorer consumes.
+
+### 11.3 The lagged-correlation scorer (#5) ✅
+
+`internal/metrics/correlation.go` is pure Go (mirrors `histogram.go`; **11 unit
+tests**, runs on macOS), ported from `docs/sim/temporal-correlation.html`. It
+scores **shape co-movement, not magnitude**, because a legitimately busy pod must
+not score high just for being busy — *busy ≠ guilty*.
+
+The tool is a **lagged Pearson correlation**. Pearson is invariant to scale and
+offset, so multiplying an offender's CPU by 100 does **not** change `r` — only the
+*shape* agreement does:
+
+$$r(\text{lag}) = \frac{n\sum x_i y_{i+\text{lag}} - \sum x_i \sum y_{i+\text{lag}}}{\sqrt{(n\sum x_i^2 - (\sum x_i)^2)(n\sum y_{i+\text{lag}}^2 - (\sum y_{i+\text{lag}})^2)}}$$
+
+with `x` the offender's `CpuNs` series and `y` the victim's `RunqLatNs`. Three
+anti-false-positive guards (the part that keeps it honest):
+
+- **Causality lag.** We search `lag ∈ [0, MaxLag]` where the offender *precedes*
+  the victim (cause before effect) and keep the strongest positive `r`. An effect
+  cannot lead its cause.
+- **Activity gate.** Both series need ≥ `MinActive` buckets above `ActiveFloor`,
+  else return 0 (`Gated`). Pearson over mostly-zero buckets is fragile — one
+  coincident blip yields a spuriously high `r`.
+- **Variance floor + anti-correlation clamp.** A flat-but-loud series is gated;
+  `Confidence()` clamps negative `r` (victim moving *against* the offender) to 0.
+
+A **gated** result means *"not attributable"*, not *"innocent"* — the same honesty
+rule as a cold baseline.
+
+### 11.4 Wiring it into the verdict ✅
+
+Each interval the agent indexes the drained timeline by cgroup, and for every CPU
+offender pairs its `CpuNs` against each CPU victim's `RunqLatNs`
+(`burstCorrelation`, `agent.go`), keeping the best `Confidence()`. It's surfaced
+as a `CORREL` column and `sentinel_pod_cpu_burst_correlation`, and folded
+**conservatively** into the existing gate:
+
+$$\text{harm}' = \max(\text{victimSignal}_{\text{node-wide}},\ \text{correlation})$$
+
+A strong shape match raises *this* offender's harm linkage above the generic
+node-wide signal — but `changed` and `magnitude` still gate via `min`, and a
+sparse timeline gates correlation to 0. So correlation can **corroborate**, never
+**invent**, an offender ("the anomaly-vs-baseline gate stays on top").
+
+> **Verified live, including the limit.** On the cluster the scorer computes real
+> values and nudges confidence. It correctly stays **low for a steadily-busy pod**
+> (flat series → little shape) — the design working, not a bug. Demonstrating
+> correlation as the *deciding* factor needs a cleanly intermittent multi-core
+> workload (a follow-up), and the thresholds (`ActiveFloor`/`MinActive`) want
+> tuning against real bucket magnitudes.
+
+### 11.5 CFS throttling as a confidence input (#6) ✅
+
+A bursty pod can back up the scheduler at *moderate* average CPU — and the kernel
+already records exactly that: **CFS throttling**. `cpu.stat`'s `nr_throttled` /
+`throttled_usec` count how often a cgroup hit its CPU quota. It's a plain cgroupfs
+read — **no probe needed** (`internal/cgroup/cpustat.go`, portable, 4 tests):
+
+```go
+type CPUStat struct { NrPeriods, NrThrottled, ThrottledUsec uint64 }
+func (s CPUStat) ThrottledFraction() float64 { return NrThrottled / NrPeriods } // 0..1
+func (s CPUStat) Sub(prev CPUStat) CPUStat   // monotonic per-interval delta (clamps resets)
+```
+
+The resolver records each cgroup's dir during its scan and exposes
+`ReadCPUStat(cgroupID)`. The agent diffs each offender's `cpu.stat` against last
+interval, shows a `THROTTLE` column + `sentinel_pod_cpu_throttle_ratio`, and folds
+the throttle fraction into confidence by **standing in for the CHANGED signal**:
+
+$$\text{changed}' = \max(\text{changed},\ \text{throttleFraction})$$
+
+Throttling is direct evidence a pod is hitting its cap and disrupting the
+scheduler, so it corroborates a spike *and works before the learned baseline is
+warm*. `magnitude` and `harm` still gate via `min`.
+
+> **The contrast, measured live.** An *unlimited* hog (53.8 % CPU, no throttle)
+> scored **0 %** — efficiently busy, its load is its own normal — while a
+> *quota-capped* hog (25.2 % CPU, throttled 100 % of periods) scored **100 %**.
+> Throttle correctly promoted the *disruptively bursty* pod over the *higher-CPU
+> steady* one. That separation is the whole point of #6.
+
+So the CPU confidence is now:
+
+$$\text{confidence} = \min\big(\underbrace{\max(\text{changed},\text{throttle})}_{\text{behaving disruptively}},\ \text{magnitude},\ \underbrace{\max(\text{victimSignal},\text{correlation})}_{\text{linked to real harm}}\big)$$
+
+— still an AND of "disruptive", "big enough", and "really hurting someone", just
+with two new, independent ways to satisfy the first and third terms.
+
+---
+
+## 12. Short-lived pod attribution — never losing a name
+
+Stats are keyed by `cgroup_id`, which survives PID exit — so the *data* for a
+container that lived two seconds is captured. But the `cgroup_id → pod` **name**
+came only from periodic cgroupfs + CRI rescans, so a container born and gone
+*between* rescans resolved to `unknown` and was dropped. Two complementary fixes:
+capture the name **at birth**, and keep it **past death**.
+
+```mermaid
+flowchart LR
+    mk["cgroup_mkdir<br/>(kernel)"] -->|"ringbuf"| birth["lazy CRI join<br/>cache.put()  (#2)"]
+    rm["cgroup_rmdir"] -->|"ringbuf"| death["cache.tombstone()  (#2)"]
+    birth --> cache[("TTL cache (#3)<br/>name survives ttl<br/>after the cgroup is gone")]
+    death --> cache
+    style cache fill:#cdebd3,stroke:#2f6b38,color:#10240f
+```
+
+### 12.1 The in-kernel lifecycle watcher (#2) ✅
+
+A new BPF program (`cgroup_monitor.bpf.c`) attaches `tp_btf/cgroup_mkdir` and
+`tp_btf/cgroup_rmdir` and emits `(cgroup_id, op, path)` to the project's **first
+ring buffer** (`BPF_MAP_TYPE_RINGBUF`, 256 KB). The kernel side stays lean —
+record and emit; all parsing and the CRI join happen in Go:
+
+- A Go goroutine (`CgroupObserver` + `ringbuf.Reader`, `internal/ebpf/cgroup.go`)
+  reads each event. On **mkdir** it parses the container ID from the scope path
+  and does a single-container CRI `ContainerStatus` lookup → `cache.put` (named at
+  birth, before the next rescan could miss it). On **rmdir** it `cache.tombstone`s
+  the id.
+- A ringbuf has no value type, so bpf2go's `-type cgroup_event` finds no BTF
+  unless something references the struct — hence a `_unused_cgroup_event` global
+  to force BTF emission (another host-build-only discovery).
+
+It's best-effort (fsnotify + the periodic rescan remain the fallback). Known
+limit: if CRI hasn't registered the container at `mkdir` time the lazy join
+no-ops; the TTL tombstone (below) covers capture-at-death regardless.
+
+### 12.2 The TTL'd resolver cache (#3) ✅
+
+`internal/cgroup/ttlcache.go` (portable, **6 tests** with an injectable clock)
+replaces the resolver's "replace the whole map each Refresh" with a **merge that
+keeps a vanished cgroup's name for a grace period** (`CacheTTL`, default 30 s ≈ 6
+read intervals):
+
+- **Live** entries never expire (zero expiry).
+- A `Refresh` that no longer sees a cgroup starts its grace clock
+  (`expiry = now + ttl`); a later refresh does **not** reset it.
+- `get` rejects an expired tombstone even before the next prune; `replace` drops
+  entries past their deadline.
+- `tombstone` (driven by `cgroup_rmdir`) starts the clock immediately; `put`
+  (driven by `cgroup_mkdir`) adds one entry live without a full scan.
+
+So a histogram captured in a pod's **final interval** still resolves to a real
+name instead of `unknown`. (`PodID` moved to a portable file so the cache builds
+and tests anywhere.)
+
+> **Verified live:** a short-lived (~8 s) burster was attributed **by name**
+> (`sentinel-system/shortlived-hog/hog`, not `system(cg:…)`), the two tp_btf
+> programs passed the verifier, and the ringbuf drained with zero errors under
+> cgroup churn.
+
+---
+
+## 13. Remediation — the controller finally *acts* (#7) ✅ (Event tier)
+
+Through Phase 1 the controller only **aggregated** (§8). Issue #7 closes the
+control loop: detect → decide → **act**. It is deliberately the most conservative
+code in the project, because acting on the wrong pod is the one failure the whole
+confidence model exists to prevent.
+
+```mermaid
+flowchart LR
+    rep["agent POST /report<br/>(snapshot w/ confident offenders)"] --> ing["controller ingest"]
+    ing --> gate{"--remediate ON<br/>& node not healthy?"}
+    gate -->|no| obs["observe-only<br/>(default)"]
+    gate -->|yes| rem["Remediator"]
+    rem --> tgt["confidentTargets:<br/>Confidence ≥ ConfidenceMin,<br/>real ns/pod/container only"]
+    tgt --> cd{"out of<br/>cooldown?"}
+    cd -->|no| skip["skip"]
+    cd -->|yes| ev["emit Warning Event<br/>Reason: NoisyNeighborThrottled<br/>anchored to the pod"]
+    style obs fill:#cdebd3,stroke:#2f6b38,color:#10240f
+    style ev fill:#ffe7bf,stroke:#9c7209,color:#3a2a00
+```
+
+### 13.1 What it does — and explicitly does *not*
+
+The mandatory tier is **Event-only**: it emits a Kubernetes **Warning Event**
+(`Reason: NoisyNeighborThrottled`) on the offending pod, anchored to the real
+object (the pod is fetched for its UID). It does **not** evict, cordon, taint,
+delete, or resize — issue #7 is *"timeout, not eviction"*. Visibility is the
+point: a silently-throttled pod with no Event is its own 3 am mystery.
+
+### 13.2 Four layers of safety
+
+1. **Off by default.** `--remediate` is `false`; the controller is observe-only
+   unless explicitly enabled. `--dry-run` logs intended actions without any API
+   call.
+2. **Confidence-gated.** Acts only on offenders the per-node model already marked
+   confident (`Confidence ≥ ConfidenceMin`), across CPU/disk/net. `splitPod`
+   rejects `system(cg:…)` / `unknown` — unattributed cgroups are **never** acted
+   on.
+3. **Per-pod cooldown** (default 5 m) so a sustained offender produces one Event
+   per window, not one per report.
+4. **RBAC defense-in-depth.** The controller's ClusterRole grants only
+   `events: create/patch` and `pods: get/list`. **No** `pods/eviction`, `delete`,
+   or pod `patch` — even a bug *cannot* evict; it lacks the permission.
+
+Remediation runs inside `ingest` and never returns an error: one pod's failure
+must not stop the others, and acting must never disrupt detection.
+
+It is unit-tested with a fake clientset + injectable clock (**8 tests**): the
+gate, dimension extraction, Event anchoring/Reason/Type, the cooldown window and
+its elapse, dry-run emitting nothing, and low-confidence being skipped.
+
+### 13.3 Verified live — and a finding
+
+With `--remediate` on the cluster, a 100 %-confidence offender received a
+`NoisyNeighborThrottled` Warning Event on its pod; the cooldown held; low-
+confidence stayed alert-only. **But** running it live surfaced that the
+**network-dimension confidence over-fires** — many real pods flagged as 100 %
+`net` offenders (retransmit victim signal + share-of-bytes magnitude saturate too
+easily). That's tracked as a **separate calibration issue** and must be fixed
+before enabling remediation broadly; it doesn't affect the CPU path.
+
+### 13.4 What's next (🔜)
+
+- **Primary `/resize` tier** (KEP-1287): patch the pod's `/resize` subresource so
+  the *kubelet itself* lowers the CPU limit — nothing to fight, with a clean
+  `PodResize*` audit trail — falling back to this Event tier when unavailable.
+- **Network confidence recalibration** (the finding above).
 
 ---
 
@@ -1041,7 +1423,7 @@ Contrast: if `cruncher` were the node's *only* pod, there'd be **no victim** (st
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — the three orientation diagrams.
 - [`HOW.md`](HOW.md) — eBPF compile/embed/load/attach mechanics, focused.
 - [`sim/temporal-correlation.html`](sim/temporal-correlation.html) — interactive
-  toys for the 🔜 sub-interval correlation work.
+  toys for the sub-interval correlation model (now ✅ built — §11).
 - [`node-sentinel-design-v0.3.md`](node-sentinel-design-v0.3.md) — the
   authoritative design (HLD, LLD, CRDs, safety, phases).
 - [`node-sentinel-internals.md`](node-sentinel-internals.md) — the same dataflow
