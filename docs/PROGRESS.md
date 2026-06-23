@@ -4,6 +4,20 @@ A running record of completed work, newest phase first. Roadmap lives in design 
 
 ---
 
+## Phase 3 — Remediation (in progress)
+
+Goal: close the control loop — the controller stops being observe-only and *acts* on confident offenders, conservatively and visibly (milestone "Temporal correlation (v0.2)", issue #7).
+
+### Tiered remediation — Event tier + framework (`internal/controller/remediation.go`) — issue #7 ✅ (host-verified)
+- The controller now has a Kubernetes client (`client-go`, in-cluster) and a `Remediator`. **Off by default** — observe-only unless `--remediate`, with `--dry-run` and a per-pod `--cooldown` (default 5m).
+- **Decision engine:** acts only on offenders the per-node confidence model already marked confident (`Confidence >= ConfidenceMin`), across CPU/disk/net; `system(cg:..)`/`unknown` are never acted on (the honest-attribution rule, unit-tested in `splitPod`).
+- **Mandatory Event tier:** emits a `Warning` Event (`Reason: NoisyNeighborThrottled`) anchored to the offending pod (looked up for UID), so a throttled pod is never a silent mystery. Per-pod cooldown prevents Event spam.
+- **RBAC** (`deploy/rbac.yaml`): a minimal ClusterRole — `events: create/patch`, `pods: get/list`. No evict/delete/patch; the mandatory tier only emits Events.
+- **8 portable unit tests** (fake clientset + injectable clock): gate, dimension extraction, Event anchoring/Reason/Type, cooldown window + elapse, dry-run emits nothing, low-confidence skipped.
+- **Host-verified** on the GKE cluster: with `--remediate` live, a 100%-confidence offender (`noisy-neighbor-remediate`) got a `NoisyNeighborThrottled` Warning Event on the pod; cooldown held; low-confidence stayed alert-only. Then disabled + cleaned up.
+- 🔎 **Finding (follow-up):** with remediation live, the **network dimension flagged many real pods as 100%-confident offenders** — the net confidence (retransmit victim + share-of-bytes magnitude) appears mis-calibrated and over-fires. Separate from #7; worth a calibration issue before enabling remediation broadly.
+- 🔜 Next tier: in-place `/resize` (KEP-1287) as the primary actuator, with fallback to this Event tier.
+
 ## Phase 2 — Temporal correlation (in progress)
 
 Goal: attribute a victim's stalls to the offender that caused them by the *shape* of bursts over sub-interval time, not magnitude (milestone "Temporal correlation (v0.2)", issues #2–#7).

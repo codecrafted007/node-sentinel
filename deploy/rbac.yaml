@@ -1,9 +1,9 @@
 # Service accounts for the agent and controller.
 #
-# Slice 1 needs no cluster RBAC: the agent reads the CRI socket and cgroups
-# directly (not the kube API), and the controller only aggregates reports. The
-# controller's Roles (events, nodes get/patch, pods/eviction) arrive with the
-# later slices that emit Events and remediate.
+# The agent reads the CRI socket and cgroups directly (not the kube API), so it
+# needs no cluster RBAC. The controller stays observe-only by default; the
+# ClusterRole below is only exercised when it runs with --remediate (issue #7),
+# which emits Events on the offending pods (and reads pods to anchor them).
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -15,3 +15,32 @@ kind: ServiceAccount
 metadata:
   name: node-sentinel-controller
   namespace: sentinel-system
+---
+# Remediation RBAC (issue #7): create Events on offending pods, and read pods to
+# anchor those Events to the real object. Cluster-scoped because offenders can be
+# in any namespace. Intentionally minimal — no evict/delete/patch here; the
+# mandatory tier only emits Events.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: node-sentinel-controller
+rules:
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: node-sentinel-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: node-sentinel-controller
+subjects:
+  - kind: ServiceAccount
+    name: node-sentinel-controller
+    namespace: sentinel-system
