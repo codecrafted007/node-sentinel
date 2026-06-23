@@ -364,26 +364,32 @@ func (a *Agent) ioVictims(blkio []ebpf.CgroupBlkio) ([]report.Victim, float64) {
 
 // netVictims: pods whose TCP segments are being retransmitted.
 func (a *Agent) netVictims(network []ebpf.CgroupNet) ([]report.NetVictim, float64) {
-	floor := float64(a.cfg.RetransWarn)
 	var out []report.NetVictim
 	worst := 0.0
 
 	for _, r := range network {
+		// Gate 1: enough activity for a rate to mean anything.
 		if r.TxSegs < uint64(a.cfg.MinSegs) {
 			continue
 		}
-		isVictim, deg := a.judgeVictim(a.netBaseline, floor, r.CgroupID, float64(r.Retransmits))
+		// Gate 2: a meaningful absolute count (a few stray retransmits at a high
+		// rate over little traffic shouldn't trigger).
+		if r.Retransmits < uint64(a.cfg.RetransWarn) {
+			continue
+		}
+		// Judge the retransmit RATE (issue #12), not the raw count: a pod that
+		// simply sends a lot accumulates retransmits without being in trouble.
+		// The baseline learns each pod's normal rate, so we flag a rate that is
+		// both genuinely high (floor) and unusual for itself.
+		rate := float64(r.Retransmits) / float64(r.TxSegs)
+		isVictim, deg := a.judgeVictim(a.netBaseline, a.cfg.RetransRateWarn, r.CgroupID, rate)
 		if isVictim {
 			if deg > worst {
 				worst = deg
 			}
-			rate := 0.0
-			if r.TxSegs > 0 {
-				rate = float64(r.Retransmits) / float64(r.TxSegs) * 100
-			}
 			out = append(out, report.NetVictim{
 				Pod: a.label(r.CgroupID), Retransmits: r.Retransmits,
-				RatePct: rate, Degradation: deg, Segs: r.TxSegs,
+				RatePct: rate * 100, Degradation: deg, Segs: r.TxSegs,
 			})
 		}
 	}

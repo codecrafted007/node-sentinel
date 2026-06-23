@@ -60,11 +60,22 @@ type Config struct {
 
 	// --- network dimension ---
 
-	// RetransWarn is the TCP retransmit count in an interval a pod must exceed
-	// to count as a network victim.
+	// A network victim must clear three gates (issue #12): enough activity
+	// (MinSegs), a meaningful absolute retransmit count (RetransWarn), AND a
+	// retransmit *rate* above RetransRateWarn — because a high-throughput pod
+	// racks up retransmits just by sending a lot, even at a healthy rate. The
+	// baseline then learns each pod's normal *rate*, so we flag a pod whose rate
+	// is unusual for itself, not one that simply moves a lot of traffic.
+
+	// RetransWarn is the minimum absolute TCP retransmit count in an interval
+	// (a floor so a couple of stray retransmits at a high rate don't trigger).
 	RetransWarn int
-	// MinSegs is how many sendmsg calls a cgroup needs before its retransmits
-	// are judged (enough network activity to be meaningful).
+	// RetransRateWarn is the retransmit rate (retransmits / sendmsg calls) a pod
+	// must exceed to count as a network victim. ~0.01 = 1%; healthy TCP is well
+	// under that, real trouble is several percent.
+	RetransRateWarn float64
+	// MinSegs is how many sendmsg calls a cgroup needs before its retransmit rate
+	// is judged (enough network activity for the rate to be meaningful).
 	MinSegs int
 
 	// --- observability surfaces ---
@@ -101,6 +112,7 @@ func DefaultConfig() Config {
 		IOWarn:              20 * time.Millisecond,
 		MinOps:              20,
 		RetransWarn:         10,
+		RetransRateWarn:     0.01, // 1% retransmit rate; healthy TCP is well under this
 		MinSegs:             50,
 		MetricsAddr:         ":2112",
 		LocalSocket:         "/var/run/sentinel/agent.sock",
