@@ -7,10 +7,13 @@
 //   - Off by default. The controller is observe-only unless remediation is
 //     explicitly enabled, and a dry-run mode logs intended actions without
 //     touching the API.
-//   - Tiered and visibility-first. The mandatory tier is a Kubernetes Event
-//     (Reason: NoisyNeighborThrottled) so a throttled pod is never a silent
-//     mystery. The in-place /resize tier (KEP-1287) layers on top later.
-//   - Per-pod cooldown so one sustained offender doesn't spam Events every
+//   - Tiered and visibility-first. The primary tier (when --resize is set) is an
+//     in-place /resize (KEP-1287): the kubelet itself lowers the offender's CPU
+//     limit to its request, then it is restored after a fixed window (resize.go).
+//     The mandatory fallback is a Kubernetes Event (Reason: NoisyNeighborThrottled)
+//     — so a throttled pod is never a silent mystery, and clusters without
+//     in-place resize still get an alert. Every resize is itself announced by an Event.
+//   - Per-pod cooldown so one sustained offender doesn't spam actions every
 //     report interval.
 //
 // Portable Go (client-go, no eBPF) — builds and unit-tests anywhere.
@@ -40,8 +43,19 @@ type RemediationConfig struct {
 	// fully exercised; nothing is mutated.
 	DryRun bool
 	// Cooldown is the minimum time between actions on the same pod, so a steady
-	// offender produces one Event per cooldown, not one per report.
+	// offender produces one action per cooldown, not one per report.
 	Cooldown time.Duration
+	// Resize enables the in-place /resize tier (KEP-1287) for CPU offenders: lower
+	// the limit to the request, then restore it after RestoreAfter. When false (or
+	// the pod can't be resized), remediation is Event-only.
+	Resize bool
+	// RestoreAfter is how long a /resize throttle stays in place before it is
+	// lifted back to the original limit ("timeout, not eviction").
+	RestoreAfter time.Duration
+	// Namespaces, when non-empty, restricts remediation to offenders in these
+	// namespaces — the safe way to roll out actuation (start with one namespace).
+	// Empty means act in every namespace.
+	Namespaces []string
 }
 
 // target is one pod the snapshot named as a confident offender.
@@ -59,8 +73,11 @@ type Remediator struct {
 	cfg    RemediationConfig
 	now    func() time.Time
 
-	mu       sync.Mutex
-	lastActed map[string]time.Time // pod key -> last action time (cooldown)
+	mu        sync.Mutex
+	lastActed map[string]time.Time      // pod key -> last action time (cooldown)
+	throttled map[string]*throttleState // pod key -> active /resize throttle awaiting restore
+
+	nsAllow map[string]bool // nil/empty = all namespaces
 }
 
 // NewRemediator builds a remediator over a Kubernetes client.
@@ -68,11 +85,23 @@ func NewRemediator(client kubernetes.Interface, cfg RemediationConfig) *Remediat
 	if cfg.Cooldown <= 0 {
 		cfg.Cooldown = 5 * time.Minute
 	}
+	if cfg.RestoreAfter <= 0 {
+		cfg.RestoreAfter = 10 * time.Minute
+	}
+	var nsAllow map[string]bool
+	if len(cfg.Namespaces) > 0 {
+		nsAllow = make(map[string]bool, len(cfg.Namespaces))
+		for _, ns := range cfg.Namespaces {
+			nsAllow[ns] = true
+		}
+	}
 	return &Remediator{
 		client:    client,
 		cfg:       cfg,
 		now:       time.Now,
 		lastActed: map[string]time.Time{},
+		throttled: map[string]*throttleState{},
+		nsAllow:   nsAllow,
 	}
 }
 
@@ -81,23 +110,56 @@ func NewRemediator(client kubernetes.Interface, cfg RemediationConfig) *Remediat
 // must not stop the others, and remediation must never disrupt detection.
 func (r *Remediator) Remediate(ctx context.Context, s report.Snapshot) {
 	for _, t := range confidentTargets(s) {
+		if r.nsAllow != nil && !r.nsAllow[t.namespace] {
+			continue // remediation not enabled for this namespace
+		}
+		if r.isThrottled(t.key()) {
+			continue // already throttled and awaiting restore
+		}
 		if !r.takeCooldown(t.key()) {
 			continue // acted on this pod recently
 		}
-		msg := fmt.Sprintf("node-sentinel: %s is a confident %s noisy-neighbour (%.0f%% >= %.0f%% confidence) on node %s — throttling recommended",
-			t.key(), t.resource, t.confidence*100, s.ConfidenceMin*100, s.NodeName)
-
-		if r.cfg.DryRun {
-			fmt.Printf("[remediate] DRY-RUN would Event: %s\n", msg)
-			continue
-		}
-		if err := r.emitEvent(ctx, t, msg); err != nil {
-			fmt.Printf("[remediate] Event for %s failed: %v\n", t.key(), err)
-			r.clearCooldown(t.key()) // let the next report retry
-			continue
-		}
-		fmt.Printf("[remediate] Event emitted: %s\n", msg)
+		r.act(ctx, t, s)
 	}
+}
+
+// act applies the tiered remediation for one confident offender: try the
+// /resize tier first (CPU only, when enabled), and fall back to an Event.
+func (r *Remediator) act(ctx context.Context, t target, s report.Snapshot) {
+	why := fmt.Sprintf("confident %s noisy-neighbour (%.0f%% >= %.0f%% confidence) on node %s",
+		t.resource, t.confidence*100, s.ConfidenceMin*100, s.NodeName)
+
+	if r.cfg.DryRun {
+		tier := "Event"
+		if r.cfg.Resize && t.resource == "cpu" {
+			tier = "resize→Event"
+		}
+		fmt.Printf("[remediate] DRY-RUN would %s: %s (%s)\n", tier, t.key(), why)
+		return
+	}
+
+	// Primary tier: in-place /resize (CPU offenders only). On success it emits
+	// its own Event; on any failure we fall through to the Event tier.
+	if r.cfg.Resize && t.resource == "cpu" && r.throttle(ctx, t, why) {
+		return
+	}
+
+	// Fallback tier: a Warning Event (always available).
+	msg := "node-sentinel: " + t.key() + " is a " + why + " — throttling recommended"
+	if err := r.emitEvent(ctx, t, msg); err != nil {
+		fmt.Printf("[remediate] Event for %s failed: %v\n", t.key(), err)
+		r.clearCooldown(t.key()) // let the next report retry
+		return
+	}
+	fmt.Printf("[remediate] Event emitted: %s\n", msg)
+}
+
+// isThrottled reports whether a pod already has a /resize throttle in flight.
+func (r *Remediator) isThrottled(key string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.throttled[key]
+	return ok
 }
 
 // takeCooldown returns true and records the action time if the pod is out of

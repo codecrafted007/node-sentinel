@@ -3,11 +3,13 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
@@ -149,4 +151,137 @@ func TestRemediateSkipsLowConfidence(t *testing.T) {
 func eventCount(cs *fake.Clientset) int {
 	evs, _ := cs.CoreV1().Events("").List(context.Background(), metav1.ListOptions{})
 	return len(evs.Items)
+}
+
+// --- /resize tier (#7 resize) ---
+
+func cpuPod(ns, name, container, request, limit string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: container,
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(request)},
+				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(limit)},
+			},
+		}}},
+	}
+}
+
+func podCPULimit(cs *fake.Clientset, ns, name string) string {
+	p, _ := cs.CoreV1().Pods(ns).Get(context.Background(), name, metav1.GetOptions{})
+	return p.Spec.Containers[0].Resources.Limits.Cpu().String()
+}
+
+func eventContains(cs *fake.Clientset, sub string) bool {
+	evs, _ := cs.CoreV1().Events("").List(context.Background(), metav1.ListOptions{})
+	for _, e := range evs.Items {
+		if strings.Contains(e.Message, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestResizeThrottlesCPUOffender(t *testing.T) {
+	pod := cpuPod("team", "hog", "main", "100m", "2")
+	r, cs, _ := newTestRemediator(RemediationConfig{Resize: true, Cooldown: time.Minute, RestoreAfter: 10 * time.Minute}, pod)
+
+	r.Remediate(context.Background(), contendedSnapshot()) // team/hog/main, cpu, 100%
+
+	if !r.isThrottled("team/hog") {
+		t.Fatal("expected the throttle to be recorded")
+	}
+	if got := podCPULimit(cs, "team", "hog"); got != "100m" {
+		t.Errorf("CPU limit after throttle = %s, want 100m (the request)", got)
+	}
+	if !eventContains(cs, "throttled") {
+		t.Error("expected a 'throttled' Event announcing the resize")
+	}
+}
+
+func TestResizeFallsBackToEventWhenNoRoom(t *testing.T) {
+	// request == limit → nothing to throttle down to → Event-tier fallback.
+	pod := cpuPod("team", "hog", "main", "100m", "100m")
+	r, cs, _ := newTestRemediator(RemediationConfig{Resize: true, Cooldown: time.Minute}, pod)
+
+	r.Remediate(context.Background(), contendedSnapshot())
+
+	if r.isThrottled("team/hog") {
+		t.Error("should not throttle when the limit isn't above the request")
+	}
+	if !eventContains(cs, "throttling recommended") {
+		t.Error("expected the Event-tier fallback")
+	}
+}
+
+func TestResizeRestoresAfterWindow(t *testing.T) {
+	pod := cpuPod("team", "hog", "main", "100m", "2")
+	r, cs, clock := newTestRemediator(RemediationConfig{Resize: true, Cooldown: time.Minute, RestoreAfter: 10 * time.Minute}, pod)
+
+	r.Remediate(context.Background(), contendedSnapshot()) // throttles 2 → 100m
+	if got := podCPULimit(cs, "team", "hog"); got != "100m" {
+		t.Fatalf("precondition: limit = %s, want 100m", got)
+	}
+
+	*clock = clock.Add(11 * time.Minute) // past the restore window
+	r.restoreDue(context.Background())
+
+	if r.isThrottled("team/hog") {
+		t.Error("throttle should be cleared after restore")
+	}
+	if got := podCPULimit(cs, "team", "hog"); got != "2" {
+		t.Errorf("CPU limit after restore = %s, want 2 (the original)", got)
+	}
+	if !eventContains(cs, "restored") {
+		t.Error("expected a 'restored' Event")
+	}
+}
+
+func TestResizeNotBeforeRestoreWindow(t *testing.T) {
+	pod := cpuPod("team", "hog", "main", "100m", "2")
+	r, cs, clock := newTestRemediator(RemediationConfig{Resize: true, Cooldown: time.Minute, RestoreAfter: 10 * time.Minute}, pod)
+
+	r.Remediate(context.Background(), contendedSnapshot())
+	*clock = clock.Add(5 * time.Minute) // still within the window
+	r.restoreDue(context.Background())
+
+	if !r.isThrottled("team/hog") {
+		t.Error("throttle should still be active before the window elapses")
+	}
+	if got := podCPULimit(cs, "team", "hog"); got != "100m" {
+		t.Errorf("limit = %s, want still-throttled 100m", got)
+	}
+}
+
+func TestResizeDisabledIsEventOnly(t *testing.T) {
+	// Resize:false → CPU offender gets an Event, pod is untouched.
+	pod := cpuPod("team", "hog", "main", "100m", "2")
+	r, cs, _ := newTestRemediator(RemediationConfig{Resize: false, Cooldown: time.Minute}, pod)
+
+	r.Remediate(context.Background(), contendedSnapshot())
+
+	if r.isThrottled("team/hog") {
+		t.Error("resize disabled must not throttle")
+	}
+	if got := podCPULimit(cs, "team", "hog"); got != "2" {
+		t.Errorf("limit changed with resize disabled: %s", got)
+	}
+	if !eventContains(cs, "throttling recommended") {
+		t.Error("expected an Event")
+	}
+}
+
+func TestRemediateNamespaceAllowlist(t *testing.T) {
+	pod := cpuPod("team", "hog", "main", "100m", "2")
+	r, cs, _ := newTestRemediator(RemediationConfig{Resize: true, Cooldown: time.Minute, Namespaces: []string{"other"}}, pod)
+
+	r.Remediate(context.Background(), contendedSnapshot()) // offender in "team", not allowed
+
+	if r.isThrottled("team/hog") {
+		t.Error("must not act on offenders outside the namespace allowlist")
+	}
+	if eventCount(cs) != 0 {
+		t.Errorf("no action expected outside the allowlist, got %d events", eventCount(cs))
+	}
 }
