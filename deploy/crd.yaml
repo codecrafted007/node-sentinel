@@ -1,0 +1,84 @@
+# NodeHealthPolicy — cluster-policy for the controller's decision/remediation
+# engine (design §"NodeHealthPolicy"). It makes remediation declarative instead
+# of controller flags: the operating mode and the remediation parameters live in
+# a CR the controller watches.
+#
+# This slice configures the *controller's* behaviour (what it does with confident
+# offenders). Detection thresholds are still agent flags today; making those
+# policy-driven, per-node nodeSelector matching, and the full observers/threshold
+# tiers from the design are later slices. The schema accepts the design's richer
+# fields (preserveUnknownFields under spec) so policies are forward-compatible.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: nodehealthpolicies.sentinel.io
+spec:
+  group: sentinel.io
+  scope: Cluster
+  names:
+    kind: NodeHealthPolicy
+    plural: nodehealthpolicies
+    singular: nodehealthpolicy
+    shortNames: ["nhp"]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              # Accept the design's richer fields (observers, thresholds, …) even
+              # though this controller slice only acts on the ones below.
+              x-kubernetes-preserve-unknown-fields: true
+              properties:
+                mode:
+                  type: string
+                  enum: ["observe", "alert", "enforce"]
+                  default: "observe"
+                  description: >-
+                    observe = aggregate only; alert = emit Events on confident
+                    offenders; enforce = in-place /resize throttle (falling back
+                    to Events).
+                priority:
+                  type: integer
+                  default: 0
+                  description: Highest-priority policy wins when several match.
+                attribution:
+                  type: object
+                  properties:
+                    confidenceThreshold:
+                      type: number
+                      minimum: 0
+                      maximum: 1
+                      description: Minimum offender confidence to act on (gate).
+                remediation:
+                  type: object
+                  properties:
+                    resize:
+                      type: boolean
+                      description: In enforce mode, throttle CPU via /resize (else Event-only).
+                    cooldown:
+                      type: string
+                      description: Min time between actions on the same pod (Go duration, e.g. 5m).
+                    restoreAfter:
+                      type: string
+                      description: How long a /resize throttle holds before restore (e.g. 10m).
+                    namespaces:
+                      type: array
+                      items: { type: string }
+                      description: Namespaces to remediate in (empty = all).
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Mode
+          type: string
+          jsonPath: .spec.mode
+        - name: Priority
+          type: integer
+          jsonPath: .spec.priority

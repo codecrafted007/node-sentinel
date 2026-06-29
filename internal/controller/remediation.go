@@ -56,6 +56,10 @@ type RemediationConfig struct {
 	// namespaces — the safe way to roll out actuation (start with one namespace).
 	// Empty means act in every namespace.
 	Namespaces []string
+	// ConfidenceThreshold, when > 0, overrides the snapshot's gate — a
+	// controller-side floor a NodeHealthPolicy can set. 0 = use the snapshot's
+	// own ConfidenceMin.
+	ConfidenceThreshold float64
 }
 
 // target is one pod the snapshot named as a confident offender.
@@ -109,7 +113,7 @@ func NewRemediator(client kubernetes.Interface, cfg RemediationConfig) *Remediat
 // that is out of cooldown. It never returns an error: a single pod's failure
 // must not stop the others, and remediation must never disrupt detection.
 func (r *Remediator) Remediate(ctx context.Context, s report.Snapshot) {
-	for _, t := range confidentTargets(s) {
+	for _, t := range confidentTargets(s, r.cfg.ConfidenceThreshold) {
 		if r.nsAllow != nil && !r.nsAllow[t.namespace] {
 			continue // remediation not enabled for this namespace
 		}
@@ -210,11 +214,14 @@ func (r *Remediator) emitEvent(ctx context.Context, t target, message string) er
 }
 
 // confidentTargets extracts the pods a snapshot named as confident offenders
-// across all three dimensions: Confidence at or above the snapshot's gate, and a
-// real namespace/pod/container identity (system/unattributed cgroups are never
-// remediated — the honest-attribution rule).
-func confidentTargets(s report.Snapshot) []target {
-	gate := s.ConfidenceMin
+// across all three dimensions: a real namespace/pod/container identity
+// (system/unattributed cgroups are never remediated — the honest-attribution
+// rule) at or above the confidence gate. gate, when > 0, overrides the
+// snapshot's own ConfidenceMin (a NodeHealthPolicy can tighten the bar).
+func confidentTargets(s report.Snapshot, gate float64) []target {
+	if gate <= 0 {
+		gate = s.ConfidenceMin
+	}
 	var out []target
 	add := func(pod string, conf float64, resource string) {
 		if conf < gate {

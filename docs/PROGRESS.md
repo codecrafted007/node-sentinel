@@ -8,6 +8,14 @@ A running record of completed work, newest phase first. Roadmap lives in design 
 
 Goal: close the control loop — the controller stops being observe-only and *acts* on confident offenders, conservatively and visibly (milestone "Temporal correlation (v0.2)", issue #7).
 
+### NodeHealthPolicy CRD — declarative remediation policy ✅ (host-verified)
+- **CRD** (`deploy/crd.yaml`, `sentinel.io/v1alpha1`, cluster-scoped): the controller's remediation is now declarative instead of flag-only. The core abstraction from the design — **`mode: observe | alert | enforce`** — maps cleanly: observe→aggregate only, alert→Event tier, enforce→`/resize` tier. Plus `attribution.confidenceThreshold` (controller-side gate that can tighten the snapshot's) and a `remediation` block (`resize`, `cooldown`, `restoreAfter`, `namespaces`). Schema `preserveUnknownFields` under spec so the design's richer fields (observers/thresholds) are forward-compatible.
+- **`internal/controller/policy.go`**: reads the policy via the **dynamic client** (no generated clientset — keeps the plain-client-go style), picks the highest-`priority` policy, and maps it to a `RemediationConfig` + active flag. Parse + map are pure functions. `cmd/controller --policy` drives remediation from the CRD (overriding the flags); flags remain the fallback path.
+- **Faithful to the design where it matches** (`mode`, `attribution`, `nodeSelector`/`priority` naming) but configures what node-sentinel *actually does* (resize/Event tiers), not the design's aspirational taint/cordon/evict.
+- **RBAC**: + `nodehealthpolicies` get/list/watch. Sample at `deploy/nodehealthpolicy-sample.yaml`.
+- **9 unit tests** (parse full spec, observe-default, mode→config for all four cases, highest-priority selection + none-found via the dynamic fake client).
+- 🔜 Live re-watch (today a policy change needs a controller restart), per-node `nodeSelector` matching, and policy-driven *detection* thresholds (still agent flags).
+
 ### In-place /resize primary tier — issue #7 (resize) ✅ (host-verified)
 - **The primary actuator** (`internal/controller/resize.go`): for a confident CPU offender, patch the pod's **`/resize` subresource** (KEP-1287) to lower its CPU limit to its request — the *kubelet* actuates the cgroup change, nothing to fight. "Timeout, not eviction": the throttle is recorded and **auto-restored** after `--restore-after` (scheduled-restore loop, `RunRestore`). Every throttle and restore is announced by an Event.
 - **Tiered**: `act()` tries `/resize` first (CPU only, with `--resize`); falls back to the Event tier when the pod has no CPU limit above its request, or the resize is rejected. Pods without a usable limit, and all disk/net offenders, stay Event-only.
