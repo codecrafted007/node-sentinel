@@ -2,7 +2,11 @@
 
 **eBPF-powered noisy-neighbor detection & remediation operator for Kubernetes.**
 
-Kubernetes shares node resources (CPU run queues, disk I/O queues, NIC queues) across pods, but the scheduler can't see contention at those boundaries. When one pod saturates a shared resource, its neighbors degrade silently. node-sentinel observes the contention *inside the kernel* with eBPF, attributes it to specific pods, and (in later phases) remediates under operator-defined policy.
+Kubernetes shares node resources (CPU run queues, disk I/O queues, NIC queues) across pods, but the scheduler can't see contention at those boundaries. When one pod saturates a shared resource, its neighbors degrade silently. node-sentinel observes the contention *inside the kernel* with eBPF, attributes it to specific pods, and remediates under operator-defined policy.
+
+![node-sentinel demo](docs/demo/node-sentinel-demo.gif)
+
+> *Detect → attribute (with a confidence score) → throttle → restore. The host agent flags the offender (and leaves the merely-busy pods alone — busy ≠ guilty); a `NodeHealthPolicy` in `enforce` mode has the controller throttle it in place via `/resize` and restore it after the window. Representative output; see [`DEPLOY-AND-TEST.md`](docs/DEPLOY-AND-TEST.md) to reproduce.*
 
 **New here?** Start with [`CONCEPTS.md`](docs/CONCEPTS.md) (what it does & how it decides, in plain English), then [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) (three diagrams: where it runs, how data flows, inside one agent) and [`HOW.md`](docs/HOW.md) (how the eBPF probe is built, embedded, and run). **Want the whole thing end to end?** → [`DEEPDIVE.md`](docs/DEEPDIVE.md), the "GOD book": foundation-to-top in one read (eBPF, cgroups/PIDs, C↔Go embedding, map reading, and the full decision model — diagrams, equations, line-by-line trace). **Want to run it?** → [`DEPLOY.md`](docs/DEPLOY.md) (Kubernetes manifests + bare-binary/systemd, step by step) · every command in one place: [`HELPERCOMMANDS.md`](docs/HELPERCOMMANDS.md) · see it catch a noisy neighbour on a live cluster: [`DETECTION-DEMO.md`](docs/DETECTION-DEMO.md). Full design: [`docs/node-sentinel-design-v0.3.md`](docs/node-sentinel-design-v0.3.md) · dataflow & scale: [`docs/node-sentinel-internals.md`](docs/node-sentinel-internals.md) · progress log: [`PROGRESS.md`](docs/PROGRESS.md).
 
