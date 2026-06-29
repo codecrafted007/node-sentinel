@@ -50,7 +50,7 @@ func TestConfidentTargetsGate(t *testing.T) {
 		IOOffenders:  []report.IOOffender{{Pod: "ns/disk/app", Confidence: 0.8}}, // confident → target
 		NetOffenders: []report.NetOffender{{Pod: "ns/net/app", Confidence: 0.5}}, // below gate → skip
 	}
-	got := confidentTargets(s)
+	got := confidentTargets(s, 0) // gate 0 → use snapshot's ConfidenceMin
 	if len(got) != 2 {
 		t.Fatalf("got %d targets, want 2: %+v", len(got), got)
 	}

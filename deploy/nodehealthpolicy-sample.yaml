@@ -1,0 +1,22 @@
+# Sample NodeHealthPolicy. Apply after deploy/crd.yaml, and run the controller
+# with --policy to have it read this instead of the remediation flags.
+#
+# mode:
+#   observe  — aggregate only (no Events, no actions)
+#   alert    — emit a Warning Event on confident offenders (the mandatory tier)
+#   enforce  — in-place /resize CPU throttle (restored after restoreAfter),
+#              falling back to an Event when the pod can't be resized
+apiVersion: sentinel.io/v1alpha1
+kind: NodeHealthPolicy
+metadata:
+  name: default
+spec:
+  mode: alert            # start safe: alert-only. Flip to enforce to actuate.
+  priority: 100
+  attribution:
+    confidenceThreshold: 0.7   # only act on offenders at/above this confidence
+  remediation:
+    resize: true               # used when mode=enforce
+    cooldown: 5m
+    restoreAfter: 10m
+    namespaces: []             # empty = all; set to roll out one namespace first
