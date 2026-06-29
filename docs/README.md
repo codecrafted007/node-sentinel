@@ -10,6 +10,7 @@ Start here, then follow the path that fits what you need.
 - [`sim/temporal-correlation.html`](sim/temporal-correlation.html) — two interactive toys (open in any browser, no build): why a coarse scrape hides short bursts, and how shape-not-magnitude correlation pins the offender. Models the 🔜 sub-interval correlation feature.
 
 ## Run it
+- [`DEPLOY-AND-TEST.md`](DEPLOY-AND-TEST.md) — **one-go runbook**: build → import/deploy → enable remediation (flags or the `NodeHealthPolicy` CRD) → trigger a confident offender and watch it get throttled + restored → tear down. Copy-pasteable, placeholders for your cluster.
 - [`DEPLOY.md`](DEPLOY.md) — Kubernetes manifests and bare-binary/systemd, step by step.
 - [`HELPERCOMMANDS.md`](HELPERCOMMANDS.md) — every command (build, run, deploy, inspect, validate) with real flags and defaults.
 - [`DETECTION-DEMO.md`](DETECTION-DEMO.md) — a reproducible walkthrough of catching a noisy neighbour on a live cluster, with real output.
