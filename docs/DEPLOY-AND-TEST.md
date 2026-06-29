@@ -42,9 +42,12 @@ The whole eBPF + Go build runs inside Docker (see [`HOW.md`](HOW.md)).
 ```
 
 **Registry-less (test / air-gapped)** — build a single-arch image to a tar that
-matches your nodes' CPU arch (`amd64` or `arm64`):
+matches your nodes' CPU arch (`amd64` or `arm64`). The tar exporter
+(`-o type=docker,dest=…`) needs a **`docker-container` buildx builder** — the
+default `docker` driver can't export a tar:
 ```sh
-docker buildx build --platform linux/<arch> --target final \
+docker buildx create --name ns-builder --driver docker-container --use   # one-time
+docker buildx build --builder ns-builder --platform linux/<arch> --target final \
   -t node-sentinel:dev -o type=docker,dest=node-sentinel-<arch>.tar .
 ```
 
