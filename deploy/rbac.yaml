@@ -16,10 +16,11 @@ metadata:
   name: node-sentinel-controller
   namespace: sentinel-system
 ---
-# Remediation RBAC (issue #7): create Events on offending pods, and read pods to
-# anchor those Events to the real object. Cluster-scoped because offenders can be
-# in any namespace. Intentionally minimal — no evict/delete/patch here; the
-# mandatory tier only emits Events.
+# Remediation RBAC (issue #7): create Events on offending pods, read pods to
+# anchor those Events / inspect their limits, and patch the pods/resize
+# subresource for the in-place CPU throttle (with --resize). Cluster-scoped
+# because offenders can be in any namespace. Intentionally minimal — still NO
+# evict/delete and no patch of the pod spec proper, only the /resize subresource.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -31,6 +32,9 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/resize"]
+    verbs: ["patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
