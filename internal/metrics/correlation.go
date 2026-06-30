@@ -125,8 +125,8 @@ func Correlate(offender, victim []float64, cfg CorrelationConfig) CorrelationRes
 
 // pearsonLagged computes the Pearson correlation between x and y with y shifted
 // later by lag buckets: it pairs x[i] with y[i+lag]. n is the number of pairs
-// that overlapped; r is 0 when either series is flat over the overlap (zero
-// denominator) or there are fewer than 3 pairs to correlate.
+// that overlapped; r is 0 when either series is (near-)flat over the overlap or
+// there are fewer than 3 pairs to correlate.
 func pearsonLagged(x, y []float64, lag int) (r float64, n int) {
 	count := len(x) - lag
 	if count < 3 {
@@ -143,11 +143,19 @@ func pearsonLagged(x, y []float64, lag int) (r float64, n int) {
 	}
 	fn := float64(count)
 	num := fn*sxy - sx*sy
-	den := math.Sqrt((fn*sxx - sx*sx) * (fn*syy - sy*sy))
-	if den == 0 {
+
+	// Each variance term n·Σx² − (Σx)² is a difference of large numbers. For a
+	// near-constant high-magnitude series (e.g. a steadily-busy pod's CpuNs),
+	// float64 cancellation can drive it slightly negative — and sqrt of a
+	// negative is NaN, which would silently poison the offender's confidence. A
+	// non-positive term means a (near-)constant series with no shape to
+	// correlate, so we report zero correlation.
+	vx := fn*sxx - sx*sx
+	vy := fn*syy - sy*sy
+	if vx <= 0 || vy <= 0 {
 		return 0, count
 	}
-	return num / den, count
+	return num / math.Sqrt(vx*vy), count
 }
 
 // activeCount returns how many buckets exceed floor — the "is anything actually
