@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"time"
@@ -235,6 +236,9 @@ func (a *Agent) reportToController(snap report.Snapshot) {
 		fmt.Printf("controller report failed: %v\n", err)
 		return
 	}
+	// Drain before closing so the keep-alive connection can be reused, rather
+	// than churning a new TCP connection every interval.
+	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
 }
 

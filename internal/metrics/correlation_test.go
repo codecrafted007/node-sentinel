@@ -148,6 +148,32 @@ func TestPearsonLaggedFlatSeries(t *testing.T) {
 	}
 }
 
+func TestPearsonLaggedNoNaNOnHugeNearConstant(t *testing.T) {
+	// A near-constant, high-magnitude series (a steadily-busy pod's CpuNs).
+	// The single-pass variance term n·Σx² − (Σx)² is a difference of ~1e31-scale
+	// numbers, so float64 cancellation can drive it slightly negative — and the
+	// old code did sqrt(negative) = NaN, silently poisoning the offender's
+	// confidence. The result must be a valid number, never NaN.
+	x := make([]float64, 16)
+	for i := range x {
+		x[i] = 1e15 + float64(i%2) // ~constant, huge magnitude
+	}
+	y := []float64{0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1}
+
+	r, _ := pearsonLagged(x, y, 0)
+	if math.IsNaN(r) {
+		t.Fatal("pearsonLagged returned NaN on a huge near-constant series")
+	}
+	if r < -1 || r > 1 {
+		t.Errorf("r = %v, out of [-1, 1]", r)
+	}
+	// And through the public scorer: Confidence must be a clean 0..1, not NaN.
+	res := Correlate(x, y, CorrelationConfig{MaxLag: 0, MinActive: 1, ActiveFloor: 0})
+	if c := res.Confidence(); math.IsNaN(c) || c < 0 || c > 1 {
+		t.Errorf("Confidence() = %v, want a clean 0..1", c)
+	}
+}
+
 func TestVariance(t *testing.T) {
 	if got := variance([]float64{4, 4, 4}); got != 0 {
 		t.Errorf("constant variance = %v, want 0", got)
