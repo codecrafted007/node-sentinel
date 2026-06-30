@@ -82,6 +82,9 @@ type Remediator struct {
 	throttled map[string]*throttleState // pod key -> active /resize throttle awaiting restore
 
 	nsAllow map[string]bool // nil/empty = all namespaces
+
+	stateNS   string     // namespace for the durable throttle ConfigMap ("" = in-memory only)
+	persistMu sync.Mutex // serializes read-modify-write of the throttle ConfigMap
 }
 
 // NewRemediator builds a remediator over a Kubernetes client.

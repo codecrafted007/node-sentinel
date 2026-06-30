@@ -65,8 +65,20 @@ func TestConfidentTargetsGate(t *testing.T) {
 
 func newTestRemediator(cfg RemediationConfig, objs ...*corev1.Pod) (*Remediator, *fake.Clientset, *time.Time) {
 	cs := fake.NewSimpleClientset()
-	// The fake client doesn't honour GenerateName (the apiserver does); simulate
-	// it so repeated Event creates get distinct names instead of colliding on "".
+	eventNameReactor(cs)
+	for _, p := range objs {
+		_, _ = cs.CoreV1().Pods(p.Namespace).Create(context.Background(), p, metav1.CreateOptions{})
+	}
+	r := NewRemediator(cs, cfg)
+	clock := time.Unix(1_000_000, 0)
+	r.now = func() time.Time { return clock }
+	return r, cs, &clock
+}
+
+// eventNameReactor makes the fake client honour GenerateName (the apiserver does;
+// the fake doesn't), so repeated Event creates get distinct names instead of
+// colliding on "".
+func eventNameReactor(cs *fake.Clientset) {
 	var gen int
 	cs.PrependReactor("create", "events", func(a clienttesting.Action) (bool, runtime.Object, error) {
 		obj := a.(clienttesting.CreateAction).GetObject()
@@ -76,13 +88,6 @@ func newTestRemediator(cfg RemediationConfig, objs ...*corev1.Pod) (*Remediator,
 		}
 		return false, nil, nil // fall through to the default tracker
 	})
-	for _, p := range objs {
-		_, _ = cs.CoreV1().Pods(p.Namespace).Create(context.Background(), p, metav1.CreateOptions{})
-	}
-	r := NewRemediator(cs, cfg)
-	clock := time.Unix(1_000_000, 0)
-	r.now = func() time.Time { return clock }
-	return r, cs, &clock
 }
 
 func contendedSnapshot() report.Snapshot {

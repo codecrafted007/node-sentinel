@@ -23,6 +23,12 @@ spec:
           image: node-sentinel:dev
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/controller", "--listen=:8080", "--log-interval=10s"]
+          env:
+            # the controller's own namespace, where it stores durable throttle state
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           ports:
             - name: http
               containerPort: 8080

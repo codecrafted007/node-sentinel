@@ -15,6 +15,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -71,12 +72,14 @@ func (r *Remediator) throttle(ctx context.Context, t target, why string) bool {
 	}
 
 	restoreAt := r.now().Add(r.cfg.RestoreAfter)
-	r.mu.Lock()
-	r.throttled[t.key()] = &throttleState{
+	st := &throttleState{
 		namespace: t.namespace, pod: t.pod, container: t.container,
 		originalCPULimit: origLimit, restoreAt: restoreAt,
 	}
+	r.mu.Lock()
+	r.throttled[t.key()] = st
 	r.mu.Unlock()
+	r.persist(ctx, t.key(), st) // durable: survive a controller restart (persist.go)
 
 	msg := fmt.Sprintf("node-sentinel: throttled %s CPU limit %s→%s (%s); restoring at %s",
 		t.key(), origLimit, newLimit, why, restoreAt.Format("15:04:05"))
@@ -100,35 +103,50 @@ func (r *Remediator) RunRestore(ctx context.Context) {
 	}
 }
 
-// restoreDue restores every throttle whose window has elapsed.
+// restoreDue restores every throttle whose window has elapsed. An entry is
+// dropped from memory + the ledger only once restore succeeds (or the pod is
+// gone); a transient failure is left in place to retry next tick.
 func (r *Remediator) restoreDue(ctx context.Context) {
 	now := r.now()
 	r.mu.Lock()
 	var due []*throttleState
-	for k, st := range r.throttled {
+	for _, st := range r.throttled {
 		if now.After(st.restoreAt) {
 			due = append(due, st)
-			delete(r.throttled, k)
 		}
 	}
 	r.mu.Unlock()
 
 	for _, st := range due {
-		r.restore(ctx, st)
+		if !r.restore(ctx, st) {
+			continue // transient failure — keep it, retry next tick
+		}
+		key := st.namespace + "/" + st.pod
+		r.mu.Lock()
+		delete(r.throttled, key)
+		r.mu.Unlock()
+		r.forget(ctx, key) // drop from the durable ledger (persist.go)
 	}
 }
 
 // restore puts a pod's original CPU limit back via /resize and announces it.
-func (r *Remediator) restore(ctx context.Context, st *throttleState) {
+// Returns true when the throttle is handled (restored, or the pod is gone) and
+// can be forgotten; false on a transient failure that should be retried.
+func (r *Remediator) restore(ctx context.Context, st *throttleState) bool {
 	key := st.namespace + "/" + st.pod
 	if err := r.patchCPULimit(ctx, st.namespace, st.pod, st.container, st.originalCPULimit); err != nil {
-		fmt.Printf("[remediate] restore %s failed: %v\n", key, err)
-		return
+		if apierrors.IsNotFound(err) {
+			fmt.Printf("[remediate] %s gone before restore — dropping throttle record\n", key)
+			return true
+		}
+		fmt.Printf("[remediate] restore %s failed: %v (will retry)\n", key, err)
+		return false
 	}
 	t := target{namespace: st.namespace, pod: st.pod, container: st.container, resource: "cpu"}
 	msg := fmt.Sprintf("node-sentinel: restored %s CPU limit to %s (throttle window elapsed)", key, st.originalCPULimit)
 	_ = r.emitEvent(ctx, t, msg)
 	fmt.Printf("[remediate] %s\n", msg)
+	return true
 }
 
 // patchCPULimit sets a container's CPU limit through the /resize subresource —
