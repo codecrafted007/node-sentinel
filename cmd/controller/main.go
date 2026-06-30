@@ -11,6 +11,7 @@ import (
 	"context"
 	"flag"
 	"log"
+	"os"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -61,7 +62,7 @@ func main() {
 		})
 		c.WithRemediator(rem)
 		if *resize {
-			go rem.RunRestore(ctx)
+			enableResizeRestore(ctx, rem, currentNamespace())
 		}
 		log.Printf("node-sentinel controller: remediation ENABLED via flags (dry-run=%v, resize=%v, cooldown=%s, restore-after=%s)",
 			*dryRun, *resize, *cooldown, *restoreAfter)
@@ -112,10 +113,29 @@ func configureFromPolicy(ctx context.Context, c *controller.Controller, kubeconf
 	rem := controller.NewRemediator(client, rcfg)
 	c.WithRemediator(rem)
 	if rcfg.Resize {
-		go rem.RunRestore(ctx)
+		enableResizeRestore(ctx, rem, currentNamespace())
 	}
 	log.Printf("node-sentinel controller: %s → remediation ACTIVE (resize=%v, cooldown=%s, restore-after=%s, namespaces=%v)",
 		p.Describe(), rcfg.Resize, rcfg.Cooldown, rcfg.RestoreAfter, rcfg.Namespaces)
+}
+
+// enableResizeRestore starts the /resize restore loop with durable, restart-safe
+// state: the throttle ledger is stored in a ConfigMap in ns (the controller's own
+// namespace), and any throttles left in flight by a previous controller are
+// recovered before the loop begins.
+func enableResizeRestore(ctx context.Context, rem *controller.Remediator, ns string) {
+	rem.EnablePersistence(ns)
+	rem.Recover(ctx)
+	go rem.RunRestore(ctx)
+}
+
+// currentNamespace returns the controller's own namespace (downward API), used
+// to store its durable throttle state. Defaults to sentinel-system.
+func currentNamespace() string {
+	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
+		return ns
+	}
+	return "sentinel-system"
 }
 
 // restConfig builds a rest.Config from an explicit kubeconfig, or the in-cluster

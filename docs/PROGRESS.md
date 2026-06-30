@@ -8,6 +8,14 @@ A running record of completed work, newest phase first. Roadmap lives in design 
 
 Goal: close the control loop — the controller stops being observe-only and *acts* on confident offenders, conservatively and visibly (milestone "Temporal correlation (v0.2)", issue #7).
 
+### Durable /resize throttle state — restart-safe remediation ✅ (production hardening)
+- **The gap:** the `/resize` throttle + scheduled restore were in-memory only — a controller restart mid-window orphaned a throttled pod (capped forever). Flagged as a known limitation on the resize PR.
+- **The fix** (`internal/controller/persist.go`): active throttles are written to a **ConfigMap (`node-sentinel-throttles`) in the controller's own namespace**, and reconciled on startup (`Recover`) so a restarted controller resumes and restores them. A ConfigMap ledger (not pod annotations) keeps the pod permissions narrow — the controller still only patches `pods/resize`, never the pod spec — and confines its own state to its own namespace.
+- **Retry-safe restore:** `restoreDue` only drops an entry (memory + ledger) once the restore succeeds or the pod is gone (`IsNotFound`); a transient failure is retried next tick.
+- Single-replica controller → ConfigMap read-modify-write is serialised by a mutex (no optimistic-retry needed). `--policy`/flag startup calls `EnablePersistence(POD_NAMESPACE)` + `Recover` before the restore loop; persistence off (`""`) keeps the prior in-memory behaviour.
+- **RBAC**: a namespaced `Role` for `configmaps` (get/create/update) in `sentinel-system` — no cluster-wide ConfigMap access. `POD_NAMESPACE` via the downward API.
+- **Tests**: a full **throttle → (fresh controller) recover → restore → forget** round-trip across two Remediator instances over one fake client, plus persistence-disabled-by-default.
+
 ### NodeHealthPolicy CRD — declarative remediation policy ✅ (host-verified)
 - **CRD** (`deploy/crd.yaml`, `sentinel.io/v1alpha1`, cluster-scoped): the controller's remediation is now declarative instead of flag-only. The core abstraction from the design — **`mode: observe | alert | enforce`** — maps cleanly: observe→aggregate only, alert→Event tier, enforce→`/resize` tier. Plus `attribution.confidenceThreshold` (controller-side gate that can tighten the snapshot's) and a `remediation` block (`resize`, `cooldown`, `restoreAfter`, `namespaces`). Schema `preserveUnknownFields` under spec so the design's richer fields (observers/thresholds) are forward-compatible.
 - **`internal/controller/policy.go`**: reads the policy via the **dynamic client** (no generated clientset — keeps the plain-client-go style), picks the highest-`priority` policy, and maps it to a `RemediationConfig` + active flag. Parse + map are pure functions. `cmd/controller --policy` drives remediation from the CRD (overriding the flags); flags remain the fallback path.
